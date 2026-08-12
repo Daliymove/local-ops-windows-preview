@@ -20,6 +20,7 @@ import secrets
 import shlex
 import shutil
 import signal
+import socket
 import stat
 import subprocess
 import sys
@@ -3388,6 +3389,35 @@ class Handler(BaseHTTPRequestHandler):
         # JSON error prevents keep-alive request smuggling via leftover bytes.
         self.close_connection = True
         self.send_err(status, message)
+        try:
+            self.wfile.flush()
+        except OSError:
+            pass
+        # Windows：closesocket() 在接收缓冲区仍有未读数据时会发 RST，
+        # 客户端可能读不到拒绝响应。先尽力消费已到达的请求体（不阻塞等待，
+        # 防止被攻击者拖住线程），再半关闭丢弃其余，最后正常 FIN。
+        try:
+            self.connection.setblocking(False)
+            while True:
+                try:
+                    chunk = self.connection.recv(65536)
+                    if not chunk:
+                        break
+                except (BlockingIOError, InterruptedError):
+                    break
+                except OSError:
+                    break
+        except OSError:
+            pass
+        finally:
+            try:
+                self.connection.setblocking(True)
+            except OSError:
+                pass
+        try:
+            self.connection.shutdown(socket.SHUT_RD)
+        except OSError:
+            pass
         return False
 
     def _handle_request_error(self, method, exc):
