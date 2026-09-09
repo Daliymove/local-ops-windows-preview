@@ -2,9 +2,9 @@
 
 **Preview / Alpha · 源码预览**
 
-总控台是面向 macOS 的本地服务与批处理任务启动、运行监测工具：把常用项目命令、长期服务和一次性任务集中到本地网页中。后端是 Python 3 标准库单文件实现，前端是无构建、无 CDN 的原生 HTML/CSS/JavaScript，只绑定回环地址。
+总控台是面向 macOS 与 Windows 的本地服务与批处理任务启动、运行监测工具：把常用项目命令、长期服务和一次性任务集中到本地网页中。后端是 Python 3 标准库单文件实现，前端是无构建、无 CDN 的原生 HTML/CSS/JavaScript，只绑定回环地址。
 
-> 总控台只服务当前 Mac 和当前用户，不是远程运维、多人协作或公网管理面板。它能以当前用户权限执行你保存的命令，请勿通过反向代理、SSH 隧道或端口映射暴露到不受信任的网络。当前仍为 Preview / Alpha 阶段，接口、配置格式和安装方式可能调整；`总控台.app` 是项目内启动器，不是可单独复制的自包含应用。
+> 总控台只服务当前机器和当前用户，不是远程运维、多人协作或公网管理面板。它能以当前用户权限执行你保存的命令，请勿通过反向代理、SSH 隧道或端口映射暴露到不受信任的网络。当前仍为 Preview / Alpha 阶段，接口、配置格式和安装方式可能调整；`总控台.app` 是项目内启动器，不是可单独复制的自包含应用。
 
 **📚 文档**：[使用手册](https://github.com/laogou717/local-ops/wiki/使用手册) · [数据与备份](https://github.com/laogou717/local-ops/wiki/数据与备份) · [故障排查](https://github.com/laogou717/local-ops/wiki/故障排查) · [开发者与发布指南](https://github.com/laogou717/local-ops/wiki/开发者与发布指南) · [Wiki 主页](https://github.com/laogou717/local-ops/wiki)
 
@@ -25,19 +25,33 @@
 
 ## 快速开始
 
-**要求**：macOS 12 或更高、Python 3.12、支持 ES Modules 的现代浏览器；运行时仅使用 Python 标准库，无需安装任何第三方包。（`VERSION` 是项目版本的唯一权威来源，`Info.plist`、发行包名和发行说明应与它保持一致。）
+**要求**：macOS 12 或更高，或 Windows 10/11（64 位）；Python 3.12；支持 ES Modules 的现代浏览器。运行时仅使用 Python 标准库，无需安装任何第三方包。macOS 使用自带的 `ps`、`lsof`、`osascript`；Windows 使用自带的 `netstat`、`taskkill`、PowerShell 5.1。（`VERSION` 是项目版本的唯一权威来源，`Info.plist`、发行包名和发行说明应与它保持一致。）
 
 启动方式有三种，效果相同，按习惯选择：
 
 | 方式 | 操作 | 适用场景 |
 | --- | --- | --- |
-| 双击应用 | 双击 `总控台.app` | 日常使用。后台运行，无 Terminal 窗口和 Dock 图标 |
-| 双击脚本 | 双击 `start.command` | 想在 Terminal 里看实时输出 |
-| 命令行 | `python3 server.py [--no-browser] [--preferred-port 9603]` | 调试、脚本化或远程 SSH 启动 |
+| 双击应用 | 双击 `总控台.app` | macOS 日常使用。后台运行，无 Terminal 窗口和 Dock 图标 |
+| 双击脚本 | 双击 `start.command`（macOS）/ `start.bat`（Windows） | 想在终端窗口里看实时输出 |
+| 命令行 | `python3 server.py`（macOS）/ `py -3 server.py`（Windows） | 调试、脚本化或远程启动 |
+
+命令行可选参数：`--no-browser`、`--preferred-port 9603`。
 
 首次打开互联网下载的 `总控台.app`，右键 → 打开（点「打开」），或执行 `xattr -dr com.apple.quarantine "总控台.app"`，只需一次。这是 macOS 对互联网下载应用的常规隔离提示，不是程序损坏；解压后请保持目录结构完整，不要单独移动 `总控台.app`。
 
-启动后自动打开 `http://127.0.0.1:9600`，被占则尝试 9601–9609。实际地址看顶栏「重启 :9600」按钮，或终端输出 / `~/Library/Logs/总控台/console.log`。
+启动后自动打开 `http://127.0.0.1:9600`，被占则尝试 9601–9609。实际地址看顶栏「重启 :9600」按钮，或终端输出；macOS 还可看 `~/Library/Logs/总控台/console.log`，Windows 看 `%LOCALAPPDATA%\总控台\Logs\console.log`。
+
+## Windows 适配说明
+
+本 fork 的 `main` 已合入 [dontpanic1/local-ops](https://github.com/dontpanic1/local-ops) 的 Windows 10/11 适配（对应上游 PR [#2](https://github.com/laogou717/local-ops/pull/2)），并修复了 `start.bat` 走 `--launcher` 时在 cmd 窗口出现「句柄无效」的问题。平台差异如下：
+
+- **受控进程模型**：Windows 没有进程组/信号。每个应用由一个小型 Python “锚点”进程承载（`tools/win_anchor.py`，命令行带随机 token），用户命令写入临时 `.cmd` 批处理文件后由 `cmd /c` 执行。受控身份 = 锚点 PID + token 命令行 + PPID 后代树；锚点会等到整棵进程树清空才退出（等价于 macOS 的 `wait`）。
+- **停止语义**：Windows 没有 SIGTERM。点“停止”会先尝试 `taskkill /T`，失败自动升级为 `taskkill /T /F` 强制结束整棵进程树。被停止的应用不会收到优雅退出通知，正在写入的数据可能丢失。
+- **进程扫描**：`lsof`/`ps` 换成 `netstat -ano -p tcp` 与 PowerShell `Get-CimInstance Win32_Process`；CPU% 在 Windows 上暂不提供（置 0），内存使用 WorkingSet 占比。
+- **工作目录读取**：通过 `NtQueryInformationProcess` 读 PEB（ctypes，只读）；同架构进程可读，被拒绝访问时该进程不显示目录。
+- **文件选择框**：PowerShell + WinForms 原生对话框（目录/文件）。
+- **数据目录**：Windows 默认 `%APPDATA%\总控台`（配置/图标）与 `%LOCALAPPDATA%\总控台\Logs`（日志）；同样支持 `CONSOLE_DATA_DIR`/`CONSOLE_LOG_DIR` 覆盖。Windows 无 POSIX 权限位，目录/文件安全由 NTFS ACL 保障。
+- **启动台自动识别**：Windows 上 Python 项目使用 `python`/`py -3` 运行器，并额外识别 `start.bat`/`dev.bat`/`start.cmd`/`start.ps1` 等启动脚本。
 
 ## 使用
 
@@ -57,7 +71,7 @@
 
 - 只添加你已检查且信任的命令和工作目录；总控台能以当前用户权限执行保存的 shell 命令。
 - 不要将服务绑定到 `0.0.0.0`，不要通过反向代理、SSH 隧道或端口映射对外暴露；不要在共享或不受信任的用户账户中运行。
-- 不要把 `~/Library/Application Support/总控台/config.json`、日志或故障截图未经脱敏就上传。
+- 不要把 `~/Library/Application Support/总控台/config.json`、`%APPDATA%\总控台\config.json`、日志或故障截图未经脱敏就上传。
 - 本地回环绑定只是第一层边界，不能替代写接口的 Host/Origin/控制令牌防护；发布验收必须执行 [`RELEASE_CHECKLIST.md`](RELEASE_CHECKLIST.md) 中的安全项。
 
 ## 维护说明
