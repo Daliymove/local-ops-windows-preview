@@ -15,19 +15,19 @@ function Resolve-Python {
     $ErrorActionPreference = "Continue"
     try {
         if (Get-Command py -ErrorAction SilentlyContinue) {
-            $py12 = py -3.12 -c "import sys; print(sys.version_info[0:2] >= (3, 12))" 2>$null
-            if ($py12 -match "True") {
-                return @("py", "-3.12")
+            & py -3.12 -c "import sys; sys.exit(0 if sys.version_info >= (3, 12) else 1)" 2>$null
+            if ($LASTEXITCODE -eq 0) {
+                return (& py -3.12 -c "import sys; print(sys.executable)").Trim()
             }
-            $py3 = py -3 -c "import sys; print(sys.version_info[0:2] >= (3, 12))" 2>$null
-            if ($py3 -match "True") {
-                return @("py", "-3")
+            & py -3 -c "import sys; sys.exit(0 if sys.version_info >= (3, 12) else 1)" 2>$null
+            if ($LASTEXITCODE -eq 0) {
+                return (& py -3 -c "import sys; print(sys.executable)").Trim()
             }
         }
         if (Get-Command python -ErrorAction SilentlyContinue) {
-            $pyAny = python -c "import sys; print(sys.version_info[0:2] >= (3, 12))" 2>$null
-            if ($pyAny -match "True") {
-                return @("python")
+            & python -c "import sys; sys.exit(0 if sys.version_info >= (3, 12) else 1)" 2>$null
+            if ($LASTEXITCODE -eq 0) {
+                return (& python -c "import sys; print(sys.executable)").Trim()
             }
         }
         throw "Python 3.12+ not found. Please install Python 3.12 or newer."
@@ -37,9 +37,7 @@ function Resolve-Python {
     }
 }
 
-$pyTokens = Resolve-Python
-$pyExe = $pyTokens[0]
-$pyArgs = if ($pyTokens.Count -gt 1) { $pyTokens[1..($pyTokens.Count - 1)] } else { @() }
+$pyExe = Resolve-Python
 
 # Check if frontend needs build or dependency install
 if (Test-Path -LiteralPath $frontendDir) {
@@ -92,7 +90,7 @@ if ($args) {
 }
 
 Write-Host "Starting Local Ops Console: $appDir"
-Write-Host "Python: $($pyTokens -join ' ')"
+Write-Host "Python: $pyExe"
 Write-Host ""
 
-& $pyExe @pyArgs @serverArgs
+& $pyExe @serverArgs
