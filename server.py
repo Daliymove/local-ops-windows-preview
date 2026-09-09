@@ -9,6 +9,7 @@ Windows：
 API 契约与实现要点见 AGENTS.md。
 """
 
+import atexit
 import glob
 import functools
 import errno
@@ -105,7 +106,8 @@ ICONS_DIR = os.path.join(DATA_DIR, "icons")
 LOGS_DIR, LOGS_DIR_OVERRIDDEN = resolve_runtime_dir(
     "CONSOLE_LOG_DIR", DEFAULT_LOGS_DIR)
 STATIC_DIR = os.path.join(BASE_DIR, "static")
-FRONTEND_DIST_DIR = os.path.join(BASE_DIR, "frontend", "dist")
+FRONTEND_DIR = os.path.join(BASE_DIR, "frontend")
+FRONTEND_DIST_DIR = os.path.join(FRONTEND_DIR, "dist")
 THEMES_DIR = os.path.join(STATIC_DIR, "themes")
 CONFIG_PATH = os.path.join(DATA_DIR, "config.json")
 INSTANCE_LOCK_PATH = os.path.join(DATA_DIR, "console.lock")
@@ -4603,7 +4605,58 @@ def restart_helper(old_pid, preferred_port):
     return 0
 
 
-def _run_console(preferred_port=None, open_browser=True):
+def start_frontend_dev_server():
+    """在后台启动前端 Vite 开发服务器，共用当前控制台窗口，退出时自动终止。"""
+    if not os.path.isdir(FRONTEND_DIR):
+        return None
+    pkg_json = os.path.join(FRONTEND_DIR, "package.json")
+    if not os.path.isfile(pkg_json):
+        return None
+    npm_cmd = shutil.which("npm.cmd") if IS_WIN else shutil.which("npm")
+    if not npm_cmd:
+        print("[前端] 未检测到 npm 环境，由 Python 后端直接托管静态资源", flush=True)
+        return None
+
+    node_modules = os.path.join(FRONTEND_DIR, "node_modules")
+    if not os.path.isdir(node_modules):
+        print("[前端] 首次启动，正在安装前端依赖...", flush=True)
+        subprocess.run([npm_cmd, "install"], cwd=FRONTEND_DIR)
+
+    print("[前端] 正在单窗口启动 Vite 开发服务 (http://localhost:5173)...", flush=True)
+    try:
+        proc = subprocess.Popen(
+            [npm_cmd, "run", "dev"],
+            cwd=FRONTEND_DIR,
+            shell=IS_WIN,
+        )
+        return proc
+    except Exception as e:
+        print(f"[前端] 启动 Vite 失败: {e}", flush=True)
+        return None
+
+
+def stop_frontend_dev_server(proc):
+    """安全停止前端开发服务子进程树。"""
+    if proc is None:
+        return
+    try:
+        if IS_WIN:
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        else:
+            proc.terminate()
+            proc.wait(timeout=2)
+    except Exception:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+
+
+def _run_console(preferred_port=None, open_browser=True, dev_mode=False):
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -4629,14 +4682,25 @@ def _run_console(preferred_port=None, open_browser=True):
               (PORT_START, PORT_START + PORT_TRIES - 1))
         sys.exit(1)
 
-    print("总控台已启动: http://%s:%d/  (Ctrl+C 停止)" % (HOST, port), flush=True)
+    frontend_proc = None
+    if dev_mode:
+        frontend_proc = start_frontend_dev_server()
+        if frontend_proc:
+            atexit.register(stop_frontend_dev_server, frontend_proc)
+
+    print("总控台后端已启动: http://%s:%d/  (Ctrl+C 停止)" % (HOST, port), flush=True)
     if open_browser:
-        open_browser_later(port)
+        if frontend_proc:
+            threading.Timer(1.5, lambda: webbrowser.open("http://localhost:5173/")).start()
+        else:
+            open_browser_later(port)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
+        if frontend_proc:
+            stop_frontend_dev_server(frontend_proc)
         server.server_close()
         print("已停止", flush=True)
 
@@ -4671,7 +4735,7 @@ def redirect_console_output():
             pass
 
 
-def main(preferred_port=None, open_browser=True, log_to_file=False):
+def main(preferred_port=None, open_browser=True, log_to_file=False, dev_mode=False):
     """Run exactly one console for this project/data directory."""
     migration = prepare_runtime_storage()
     if log_to_file:
@@ -4692,7 +4756,7 @@ def main(preferred_port=None, open_browser=True, log_to_file=False):
                 webbrowser.open("http://%s:%d/" % (HOST, min(ports)))
         return False
     try:
-        _run_console(preferred_port, open_browser)
+        _run_console(preferred_port, open_browser, dev_mode=dev_mode)
         return True
     finally:
         release_instance_lock(instance_lock)
@@ -4720,4 +4784,5 @@ if __name__ == "__main__":
                 preferred = int(sys.argv[index + 1])
             except (ValueError, IndexError):
                 sys.exit(2)
-        main(preferred_port=preferred, open_browser="--no-browser" not in sys.argv)
+        dev_mode = ("--dev" in sys.argv or "--with-frontend" in sys.argv) and ("--no-frontend" not in sys.argv)
+        main(preferred_port=preferred, open_browser="--no-browser" not in sys.argv, dev_mode=dev_mode)
