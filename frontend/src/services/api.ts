@@ -31,13 +31,16 @@ async function request<T = unknown>(
     signal: controller.signal,
   };
 
-  if (body !== undefined) {
-    if (isRawBody) {
+  if (isRawBody) {
+    if (body !== undefined) {
       opt.body = body as BodyInit;
-    } else {
-      opt.headers = { 'Content-Type': 'application/json' };
-      opt.body = JSON.stringify(body);
     }
+  } else if (method === 'POST' || method === 'PUT') {
+    opt.headers = { 'Content-Type': 'application/json' };
+    opt.body = JSON.stringify(body !== undefined ? body : {});
+  } else if (body !== undefined) {
+    opt.headers = { 'Content-Type': 'application/json' };
+    opt.body = JSON.stringify(body);
   }
 
   try {
@@ -94,12 +97,12 @@ export const api = {
   },
 
   // App operations
-  startApp: (id: string) => api.post(`/api/apps/${id}/start`),
-  stopApp: (id: string) => api.post(`/api/apps/${id}/stop`),
-  restartApp: (id: string) => api.post(`/api/apps/${id}/restart`),
-  diagnoseApp: (id: string) => api.post<DiagnoseResponse>(`/api/apps/${id}/diagnose`),
+  startApp: (id: string) => api.post(`/api/apps/${id}/start`, {}),
+  stopApp: (id: string) => api.post(`/api/apps/${id}/stop`, {}),
+  restartApp: (id: string) => api.post(`/api/apps/${id}/restart`, {}),
+  diagnoseApp: (id: string) => api.post<DiagnoseResponse>(`/api/apps/${id}/diagnose`, {}),
   attachApp: (id: string, pid: number) => api.post(`/api/apps/${id}/attach`, { pid }),
-  fetchAppFavicon: (id: string) => api.post(`/api/apps/${id}/favicon`),
+  fetchAppFavicon: (id: string) => api.post(`/api/apps/${id}/favicon`, {}),
   reorderApps: (ids: string[]) => api.post('/api/apps/reorder', { ids }),
   createApp: (data: Partial<AppItem> & { attachPid?: number }) => api.post<AppItem>('/api/apps', data),
   updateApp: (id: string, data: Partial<AppItem> & { stopBeforeUpdate?: boolean }) =>
@@ -122,8 +125,8 @@ export const api = {
     api.post<{ keywords: string[] }>('/api/watch', { keyword, action }),
 
   // Console self
-  restartConsole: () => api.post('/api/console/restart'),
-  stopConsole: () => api.post('/api/console/stop'),
+  restartConsole: () => api.post('/api/console/restart', {}),
+  stopConsole: () => api.post('/api/console/stop', {}),
   getConsoleLogs: async (tail: number = 300): Promise<string> => {
     const res = await api.get<{ text: string }>(`/api/console/log?tail=${tail}`);
     return (res as unknown as { text?: string }).text || '';
