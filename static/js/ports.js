@@ -54,3 +54,47 @@ export function portIsOpenable(app) {
   return !!(app && app.running && preferredOpenPort(app)
     && (!configuredPort(app) || app.listening !== false || hasPortMismatch(app)));
 }
+
+const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '::1']);
+const OPEN_URL_MAX_LEN = 500;
+
+/* 规范化用户填写的打开地址。空值表示默认「地址+端口」。
+   返回 { value } 或 { error }。路径会拼到当前端口；完整 URL 仅允许本机 http。 */
+export function normalizeConfiguredOpenUrl(value) {
+  if (value == null) return { value: null };
+  if (typeof value !== 'string') return { error: 'invalid' };
+  const raw = value.trim();
+  if (!raw) return { value: null };
+  if (raw.length > OPEN_URL_MAX_LEN || /\s/.test(raw) || raw.startsWith('//')) {
+    return { error: 'invalid' };
+  }
+  if (raw.charAt(0) === '/') return { value: raw };
+  if (!/^[a-z][a-z0-9+.-]*:/i.test(raw)
+      && !/^(localhost|127\.0\.0\.1|\[::1\])/i.test(raw)) {
+    return { value: '/' + raw };
+  }
+  let candidate = raw;
+  if (/^(localhost|127\.0\.0\.1|\[::1\])/i.test(raw)) candidate = 'http://' + raw;
+  try {
+    const parsed = new URL(candidate);
+    const host = (parsed.hostname || '').toLowerCase();
+    if (parsed.protocol === 'http:' && LOOPBACK_HOSTS.has(host) && !parsed.username) {
+      return { value: candidate };
+    }
+  } catch (e) { /* 非法地址 */ }
+  return { error: 'invalid' };
+}
+
+/* 打开链接：默认 http://地址:端口；openUrl 为路径时拼到当前端口，
+   为完整本机 URL 时按用户配置打开（用于 Astro base 等子路径站点）。 */
+export function resolveOpenUrl(item, port) {
+  const value = normalizePort(port);
+  if (!value) return '';
+  let host = item && item.openHosts && item.openHosts[String(value)];
+  if (!host && item) host = item.openHost;
+  host = host === 'localhost' ? 'localhost' : '127.0.0.1';
+  const origin = 'http://' + host + ':' + value;
+  const parsed = normalizeConfiguredOpenUrl(item && item.openUrl);
+  if (!parsed || parsed.error || !parsed.value) return origin;
+  return parsed.value.charAt(0) === '/' ? origin + parsed.value : parsed.value;
+}

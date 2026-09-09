@@ -3,6 +3,7 @@
    core.js — 共享基础：工具 / 图标 / API / Toast / 浮层 / 状态
    每 2s 轮询 GET /api/state，按 key 原地更新 DOM，不整列表重绘
    ============================================================ */
+import { resolveOpenUrl } from './ports.js';
 
 /* ---------------- 工具 ---------------- */
 export const $ = (s, r = document) => r.querySelector(s);
@@ -52,14 +53,10 @@ export function truncateMiddle(s, max = 34) {
   const keep = max - 1;
   return s.slice(0, Math.ceil(keep / 2)) + '…' + s.slice(-Math.floor(keep / 2));
 }
-/* 后端根据真实 bind address 返回 openHost；旧后端缺字段时保持原行为。 */
+/* 后端根据真实 bind address 返回 openHost；旧后端缺字段时保持原行为。
+   应用可另存 openUrl（路径或完整本机地址），用于子路径站点。 */
 export function localServiceUrl(item, port) {
-  const value = Number(port);
-  if (!Number.isInteger(value) || value <= 0 || value > 65535) return '';
-  let host = item && item.openHosts && item.openHosts[String(value)];
-  if (!host && item) host = item.openHost;
-  host = host === 'localhost' ? 'localhost' : '127.0.0.1';
-  return 'http://' + host + ':' + value;
+  return resolveOpenUrl(item, port);
 }
 /* 秒 → 刚刚 / Nm / NhNm / NdNh */
 export function fmtUptime(sec) {

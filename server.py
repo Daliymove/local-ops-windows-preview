@@ -428,9 +428,9 @@ class Config:
                "apps": [], "hidden": [], "pinned": [], "promoted": [],
                "watchedKeywords": [], "uiTheme": DEFAULT_UI_THEME}
     APP_DEFAULT = {"id": None, "name": "", "command": "", "cwd": None,
-                   "port": None, "emoji": None, "glyph": None, "icon": None,
-                   "favicon": None, "kind": "service", "lastPid": None,
-                   "lastPgid": None, "runToken": None,
+                   "port": None, "openUrl": None, "emoji": None, "glyph": None,
+                   "icon": None, "favicon": None, "kind": "service",
+                   "lastPid": None, "lastPgid": None, "runToken": None,
                    "attached": False, "lastExit": None, "createdAt": 0}
 
     def __init__(self, path):
@@ -1639,7 +1639,7 @@ def build_apps(cfg, listeners, groups=None):
             health = {"status": "unknown", "blocking": False, "issues": []}
         apps.append({
             "id": app["id"], "name": app["name"], "command": app["command"],
-            "cwd": app.get("cwd"), "port": port,
+            "cwd": app.get("cwd"), "port": port, "openUrl": app.get("openUrl"),
             "emoji": app.get("emoji"), "glyph": app.get("glyph"), "icon": app.get("icon"),
             "favicon": app.get("favicon"),
             "running": bool(live), "pid": pid,
@@ -3194,6 +3194,42 @@ def validate_port(value):
     return port, None
 
 
+OPEN_URL_MAX_LEN = 500
+OPEN_URL_LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
+
+
+def validate_open_url(value):
+    """→ (openUrl|None, error|None)。空值表示默认「地址+端口」。"""
+    if value is None or value == "":
+        return None, None
+    if not isinstance(value, str) or isinstance(value, bool):
+        return None, "openUrl 必须是字符串或 null"
+    raw = value.strip()
+    if not raw:
+        return None, None
+    if (len(raw) > OPEN_URL_MAX_LEN or any(ch.isspace() for ch in raw)
+            or raw.startswith("//")):
+        return None, "openUrl 必须是以 / 开头的路径或本机 http 地址"
+    if raw.startswith("/"):
+        return raw, None
+    looks_like_scheme = bool(re.match(r"^[a-z][a-z0-9+.-]*:", raw, re.I))
+    looks_like_host = bool(re.match(
+        r"^(localhost|127\.0\.0\.1|\[::1\])", raw, re.I))
+    if not looks_like_scheme and not looks_like_host:
+        return ("/" + raw if not raw.startswith("/") else raw), None
+    candidate = ("http://" + raw) if looks_like_host else raw
+    try:
+        parsed = urllib.parse.urlsplit(candidate)
+        host = (parsed.hostname or "").lower()
+        if (parsed.scheme == "http"
+                and host in OPEN_URL_LOOPBACK_HOSTS
+                and not parsed.username and not parsed.password):
+            return candidate, None
+    except (ValueError, UnicodeError):
+        pass
+    return None, "openUrl 必须是以 / 开头的路径或本机 http 地址"
+
+
 def validate_app_fields(data, partial):
     """校验/规范化应用字段。partial=True 时仅校验出现的字段。
     返回 (fields, error)：fields 为规范化后的字段子集。"""
@@ -3240,8 +3276,16 @@ def validate_app_fields(data, partial):
         fields["kind"] = data["kind"]
     elif not partial:
         fields["kind"] = "service"
+    if "openUrl" in data:
+        open_url, err = validate_open_url(data["openUrl"])
+        if err:
+            return None, err
+        fields["openUrl"] = open_url
+    elif not partial:
+        fields["openUrl"] = None
     if fields.get("kind") == "task":
         fields["port"] = None  # 批处理任务无端口语义
+        fields["openUrl"] = None
     return fields, None
 
 
@@ -3911,7 +3955,8 @@ class Handler(BaseHTTPRequestHandler):
             new_id = secrets.token_hex(4)
         app = {"id": new_id, "name": fields["name"],
                "command": fields["command"], "cwd": fields["cwd"],
-               "port": fields["port"], "emoji": fields["emoji"],
+               "port": fields["port"], "openUrl": fields.get("openUrl"),
+               "emoji": fields["emoji"],
                "glyph": fields["glyph"], "kind": fields["kind"],
                "icon": None, "favicon": None, "lastPid": None,
                "lastPgid": None, "runToken": None,

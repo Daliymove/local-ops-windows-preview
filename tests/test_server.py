@@ -26,6 +26,36 @@ class ParsingTests(unittest.TestCase):
         self.assertIsNotNone(server.validate_port(True)[1])
         self.assertIsNotNone(server.validate_port(70000)[1])
 
+    def test_validate_open_url_accepts_local_paths_and_loopback(self):
+        self.assertEqual(server.validate_open_url(None), (None, None))
+        self.assertEqual(server.validate_open_url(""), (None, None))
+        self.assertEqual(
+            server.validate_open_url("/daliymove-tech-share/"),
+            ("/daliymove-tech-share/", None))
+        self.assertEqual(
+            server.validate_open_url("daliymove-tech-share/"),
+            ("/daliymove-tech-share/", None))
+        self.assertEqual(
+            server.validate_open_url("http://localhost:4321/daliymove-tech-share/"),
+            ("http://localhost:4321/daliymove-tech-share/", None))
+        self.assertIsNotNone(server.validate_open_url("https://localhost:4321/")[1])
+        self.assertIsNotNone(server.validate_open_url("http://example.com/")[1])
+        self.assertIsNotNone(server.validate_open_url("//evil")[1])
+
+    def test_validate_app_fields_stores_open_url_for_services_only(self):
+        fields, err = server.validate_app_fields({
+            "name": "博客", "command": "pnpm run dev", "port": 4321,
+            "openUrl": "/daliymove-tech-share/",
+        }, partial=False)
+        self.assertIsNone(err)
+        self.assertEqual(fields["openUrl"], "/daliymove-tech-share/")
+        task, err = server.validate_app_fields({
+            "name": "备份", "command": "echo ok", "kind": "task",
+            "openUrl": "/daliymove-tech-share/",
+        }, partial=False)
+        self.assertIsNone(err)
+        self.assertIsNone(task["openUrl"])
+
     def test_listener_scan_preserves_ipv6_loopback_for_open_links(self):
         if server.IS_WIN:
             self.skipTest("lsof 解析为 macOS 专属；Windows 解析见 test_windows.py")

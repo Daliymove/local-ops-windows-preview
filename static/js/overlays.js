@@ -5,11 +5,14 @@
 import { $, el, setText, setChildren, icon, escapeHtml,
   post, put, del, act, toast, openLayer, closeLayer,
   GLYPHS, findApp, bumpMutationEpoch } from './core.js';
+import { normalizeConfiguredOpenUrl } from './ports.js';
 
 /* ---------------- DOM 引用 ---------------- */
 const appModalMask = $('#appModalMask'), appModal = $('#appModal'), appModalTitle = $('#appModalTitle');
 const fName = $('#fName'), fCmd = $('#fCmd'), fCwd = $('#fCwd'), fPort = $('#fPort');
 const kindRow = $('#kindRow'), portField = $('#portField'), fCmdLabel = $('#fCmdLabel');
+const openUrlField = $('#openUrlField'), openUrlModeRow = $('#openUrlModeRow');
+const fOpenUrl = $('#fOpenUrl'), openUrlHint = $('#openUrlHint');
 const btnPickScript = $('#btnPickScript'), btnPickCwd = $('#btnPickCwd');
 const btnDetectProject = $('#btnDetectProject');
 const detectPanel = $('#detectPanel'), detectSummary = $('#detectSummary');
@@ -177,6 +180,7 @@ function renderIconPreview() {
 let modalKind = 'service';
 let detectRequestSeq = 0;
 let detectedPortValue = null;
+let openUrlMode = 'default';
 
 function readPortValue() {
   const raw = fPort.value.trim();
@@ -184,6 +188,58 @@ function readPortValue() {
   if (!/^\d+$/.test(raw)) return NaN;
   const value = Number(raw);
   return Number.isInteger(value) && value >= 1 && value <= 65535 ? value : NaN;
+}
+
+function getProjectSlug() {
+  const name = (fName && fName.value || '').trim();
+  if (name) {
+    const clean = name.replace(/^[/\\]+|[/\\]+$/g, '').trim();
+    if (clean) return clean;
+  }
+  const cwd = (fCwd && fCwd.value || '').trim();
+  if (cwd) {
+    const parts = cwd.replace(/[/\\]+$/, '').split(/[/\\]/);
+    const last = (parts[parts.length - 1] || '').trim();
+    if (last) return last;
+  }
+  return 'my-project';
+}
+
+function updateOpenUrlDetails() {
+  const slug = getProjectSlug();
+  const port = readPortValue() || 3000;
+  if (fOpenUrl) {
+    fOpenUrl.placeholder = '如：/' + slug + '/ 或 http://localhost:' + port + '/' + slug + '/';
+  }
+  if (openUrlHint) {
+    const custom = openUrlMode === 'custom' && modalKind !== 'task';
+    setText(openUrlHint, custom
+      ? '可填路径（如 /' + slug + '/）或完整本机地址。空值仍按地址+端口打开。'
+      : '默认打开 http://地址:端口。站点有子路径时改选「自定义」。');
+  }
+}
+
+function setOpenUrlMode(mode) {
+  openUrlMode = mode === 'custom' ? 'custom' : 'default';
+  if (!openUrlModeRow) return;
+  openUrlModeRow.querySelectorAll('[data-open-url-mode]').forEach(b => {
+    const active = b.dataset.openUrlMode === openUrlMode;
+    b.classList.toggle('active', active);
+    b.setAttribute('aria-pressed', String(active));
+  });
+  const custom = openUrlMode === 'custom' && modalKind !== 'task';
+  if (fOpenUrl) {
+    fOpenUrl.hidden = !custom;
+    fOpenUrl.disabled = !custom;
+  }
+  updateOpenUrlDetails();
+}
+
+function readOpenUrlValue() {
+  if (modalKind === 'task' || openUrlMode !== 'custom') return null;
+  const parsed = normalizeConfiguredOpenUrl(fOpenUrl.value);
+  if (parsed.error) return { error: true };
+  return parsed.value;
 }
 
 function resetDetection(clearAutoPort = false) {
@@ -243,6 +299,8 @@ function setModalKind(kind) {
   });
   portField.hidden = modalKind === 'task';
   fPort.disabled = modalKind === 'task';
+  if (openUrlField) openUrlField.hidden = modalKind === 'task';
+  setOpenUrlMode(openUrlMode);
   setText(fCmdLabel, modalKind === 'task' ? '执行命令' : '启动命令');
   fName.placeholder = modalKind === 'task' ? '如：每日备份' : '如：本地博客';
   fCmd.placeholder = modalKind === 'task'
@@ -279,7 +337,10 @@ export function openAppModal(app, presetKind, focusAction = '') {
   fCmd.value = (app && app.command) || '';
   fCwd.value = (app && app.cwd) || '';
   fPort.value = app && app.port != null ? app.port : '';
-  [fName, fCmd, fCwd, fPort].forEach(clearFieldError);
+  const savedOpenUrl = app && typeof app.openUrl === 'string' ? app.openUrl.trim() : '';
+  fOpenUrl.value = savedOpenUrl;
+  setOpenUrlMode(savedOpenUrl ? 'custom' : 'default');
+  [fName, fCmd, fCwd, fPort, fOpenUrl].forEach(clearFieldError);
   setModalKind(presetKind || (app && app.kind) || 'service');
   appearanceDetails.open = !!(app && (app.icon || app.glyph));
   syncGlyphGrid();
@@ -399,8 +460,13 @@ async function detectProject() {
       return;
     }
     if (!fName.value.trim() && result.name) {
+      const oldSlug = getProjectSlug();
       fName.value = result.name;
       renderIconPreview();
+      if (openUrlMode === 'custom' && (!fOpenUrl.value.trim() || fOpenUrl.value.trim() === '/' + oldSlug + '/')) {
+        fOpenUrl.value = '/' + getProjectSlug() + '/';
+      }
+      updateOpenUrlDetails();
     }
     renderDetection(result);
     if (pendingAttach && !editingAppId &&
@@ -474,11 +540,16 @@ async function saveApp() {
     fCmd, modalKind === 'task' ? '请填写执行命令' : '请填写启动命令');
   const port = modalKind === 'task' ? null : readPortValue();
   if (Number.isNaN(port)) return fieldError(fPort, '端口必须是 1–65535 之间的整数');
+  const openUrl = modalKind === 'task' ? null : readOpenUrlValue();
+  if (openUrl && openUrl.error) {
+    return fieldError(fOpenUrl, '请填写以 / 开头的路径，或本机 http 地址');
+  }
   const body = {
     name,
     command,
     cwd: fCwd.value.trim() || null,
     port,
+    openUrl: openUrl || null,
     glyph: selectedGlyph || null,
     kind: modalKind,
   };
@@ -600,11 +671,29 @@ export function initAppModal({ onAddService, onAddTask }) {
   });
   btnDetectProject.addEventListener('click', detectProject);
   fCwd.addEventListener('input', () => resetDetection(true));
-  [fName, fCmd, fCwd, fPort].forEach(input =>
+  [fName, fCmd, fCwd, fPort, fOpenUrl].forEach(input =>
     input.addEventListener('input', () => {
       clearFieldError(input);
+      if (input === fName || input === fCwd || input === fPort) {
+        updateOpenUrlDetails();
+      }
       refreshEditSaveMode();
     }));
+  if (openUrlModeRow) {
+    openUrlModeRow.querySelectorAll('[data-open-url-mode]').forEach(b =>
+      b.addEventListener('click', () => {
+        setOpenUrlMode(b.dataset.openUrlMode);
+        if (openUrlMode === 'custom') {
+          if (!fOpenUrl.value.trim()) {
+            const slug = getProjectSlug();
+            fOpenUrl.value = '/' + slug + '/';
+          }
+          fOpenUrl.focus();
+          fOpenUrl.select();
+        }
+        refreshEditSaveMode();
+      }));
+  }
 
   /* 图标：上传 / 粘贴 / 清除 */
   btnPickIcon.addEventListener('click', () => iconFile.click());
@@ -647,7 +736,7 @@ export function initAppModal({ onAddService, onAddTask }) {
   });
   fName.addEventListener('input', renderIconPreview);
   /* 非 textarea 字段回车直接保存 */
-  [fName, fCwd, fPort].forEach(inp =>
+  [fName, fCwd, fPort, fOpenUrl].forEach(inp =>
     inp.addEventListener('keydown', e => { if (e.key === 'Enter') saveApp(); }));
 }
 

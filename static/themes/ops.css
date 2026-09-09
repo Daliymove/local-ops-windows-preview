@@ -799,6 +799,7 @@ body.dragging-on { cursor: grabbing; user-select: none; -webkit-user-select: non
   border: 1px solid var(--line-2);
   box-shadow: var(--shadow);
 }
+.open-url-row { margin-bottom: 8px; }
 
 /* 项目识别面板 */
 .detect-panel {

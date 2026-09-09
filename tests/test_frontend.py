@@ -274,6 +274,26 @@ class FrontendAccessibilityContractTests(unittest.TestCase):
         self.assertIn(".st-port-act", css)
         self.assertIn(".ibtn.open", css)
 
+    def test_app_edit_form_offers_custom_open_url(self):
+        html = (ROOT / "static/index.html").read_text(encoding="utf-8")
+        overlays = (ROOT / "static/js/overlays.js").read_text(encoding="utf-8")
+        core = (ROOT / "static/js/core.js").read_text(encoding="utf-8")
+        ports = (ROOT / "static/js/ports.js").read_text(encoding="utf-8")
+
+        self.assertIn('id="openUrlField"', html)
+        self.assertIn('data-open-url-mode="default"', html)
+        self.assertIn('data-open-url-mode="custom"', html)
+        self.assertIn("地址+端口", html)
+        self.assertNotIn("daliymove-tech-share", html)
+        self.assertNotIn("daliymove-tech-share", overlays)
+        self.assertIn("getProjectSlug", overlays)
+        self.assertIn("updateOpenUrlDetails", overlays)
+        self.assertIn("setOpenUrlMode", overlays)
+        self.assertIn("openUrl: openUrl || null", overlays)
+        self.assertIn("normalizeConfiguredOpenUrl", overlays)
+        self.assertIn("resolveOpenUrl", core)
+        self.assertIn("export function resolveOpenUrl", ports)
+
     def test_create_actions_stay_in_launchpad_and_global_palette(self):
         html = (ROOT / "static/index.html").read_text(encoding="utf-8")
         app = (ROOT / "static/app.js").read_text(encoding="utf-8")

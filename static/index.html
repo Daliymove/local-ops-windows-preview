@@ -469,6 +469,17 @@
       <input id="fPort" type="number" min="1" max="65535" step="1" inputmode="numeric"
         placeholder="可选，用于状态检测与快速打开">
     </div>
+    <div class="field" id="openUrlField">
+      <label id="openUrlLabel" for="fOpenUrl">本地打开链接</label>
+      <div class="kind-row open-url-row" id="openUrlModeRow" role="group" aria-labelledby="openUrlLabel">
+        <button class="kind-btn active" type="button" data-open-url-mode="default" aria-pressed="true">地址+端口</button>
+        <button class="kind-btn" type="button" data-open-url-mode="custom" aria-pressed="false">自定义</button>
+      </div>
+      <input id="fOpenUrl" type="text" hidden
+        placeholder="如：/my-project/ 或 http://localhost:3000/my-project/"
+        autocomplete="off" spellcheck="false">
+      <p class="hint" id="openUrlHint">默认打开 http://地址:端口。站点有子路径时改选「自定义」。</p>
+    </div>
     <details class="appearance-details" id="appearanceDetails">
       <summary>
         <span class="appearance-summary-main">

@@ -4,7 +4,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { normalizePort, configuredPort, actualPorts,
   hasPortMismatch, preferredOpenPort, displayedPorts,
-  portIsOpenable } from '../../static/js/ports.js';
+  portIsOpenable, normalizeConfiguredOpenUrl, resolveOpenUrl } from '../../static/js/ports.js';
 
 test('normalizePort 只接受 1-65535 的整数', () => {
   assert.equal(normalizePort(3000), 3000);
@@ -83,4 +83,35 @@ test('portIsOpenable：运行中且存在可打开端口', () => {
     { running: true, port: 3000, listening: false, ports: [] }), false);
   assert.equal(portIsOpenable({ running: false, port: 3000 }), false);
   assert.equal(portIsOpenable({}), false);
+});
+
+test('normalizeConfiguredOpenUrl：空值默认，路径与本机 URL 合法', () => {
+  assert.deepEqual(normalizeConfiguredOpenUrl(null), { value: null });
+  assert.deepEqual(normalizeConfiguredOpenUrl(''), { value: null });
+  assert.deepEqual(normalizeConfiguredOpenUrl('  '), { value: null });
+  assert.deepEqual(normalizeConfiguredOpenUrl('/daliymove-tech-share/'),
+    { value: '/daliymove-tech-share/' });
+  assert.deepEqual(normalizeConfiguredOpenUrl('daliymove-tech-share/'),
+    { value: '/daliymove-tech-share/' });
+  assert.deepEqual(
+    normalizeConfiguredOpenUrl('http://localhost:4321/daliymove-tech-share/'),
+    { value: 'http://localhost:4321/daliymove-tech-share/' });
+  assert.equal(normalizeConfiguredOpenUrl('https://localhost:4321/').error, 'invalid');
+  assert.equal(normalizeConfiguredOpenUrl('http://example.com/x').error, 'invalid');
+  assert.equal(normalizeConfiguredOpenUrl('//evil').error, 'invalid');
+});
+
+test('resolveOpenUrl：默认地址+端口，路径拼到当前端口，完整 URL 原样使用', () => {
+  assert.equal(resolveOpenUrl({ openHost: 'localhost' }, 4321),
+    'http://localhost:4321');
+  assert.equal(resolveOpenUrl(
+    { openHost: 'localhost', openUrl: '/daliymove-tech-share/' }, 4321),
+    'http://localhost:4321/daliymove-tech-share/');
+  assert.equal(resolveOpenUrl({
+    openHost: '127.0.0.1',
+    openUrl: 'http://localhost:4321/daliymove-tech-share/',
+  }, 4321), 'http://localhost:4321/daliymove-tech-share/');
+  assert.equal(resolveOpenUrl(
+    { openHost: 'localhost', openUrl: 'http://example.com/' }, 4321),
+    'http://localhost:4321');
 });

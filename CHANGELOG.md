@@ -10,6 +10,7 @@
 
 ### Added
 
+- 启动台服务编辑新增「本地打开链接」：默认「地址+端口」，也可自定义路径或完整本机 URL（例如 `/daliymove-tech-share/`），打开/复制按该配置跳转。
 - **Windows 10/11 适配**：后端可在 Windows 上完整运行（Python 3.12 标准库）。
   - 进程扫描改用 `netstat -ano -p tcp` 与 PowerShell `Get-CimInstance`（CPU% 暂置 0，内存用 WorkingSet 占比）。
   - 受控进程模型改为「锚点进程 + 随机 token 命令行 + PPID 后代树」：`tools/win_anchor.py` 以临时 `.cmd` 批处理执行用户命令，等整棵进程树清空后以原退出码退出，等价于 macOS 的 bash 包装语义。
