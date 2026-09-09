@@ -105,6 +105,7 @@ ICONS_DIR = os.path.join(DATA_DIR, "icons")
 LOGS_DIR, LOGS_DIR_OVERRIDDEN = resolve_runtime_dir(
     "CONSOLE_LOG_DIR", DEFAULT_LOGS_DIR)
 STATIC_DIR = os.path.join(BASE_DIR, "static")
+FRONTEND_DIST_DIR = os.path.join(BASE_DIR, "frontend", "dist")
 THEMES_DIR = os.path.join(STATIC_DIR, "themes")
 CONFIG_PATH = os.path.join(DATA_DIR, "config.json")
 INSTANCE_LOCK_PATH = os.path.join(DATA_DIR, "console.lock")
@@ -3634,25 +3635,35 @@ class Handler(BaseHTTPRequestHandler):
 
     def serve_static(self, path):
         rel = urllib.parse.unquote(path).lstrip("/") or "index.html"
-        full = os.path.normpath(os.path.join(STATIC_DIR, rel))
-        # realpath 解析后必须仍在 STATIC_DIR 内，防路径穿越与符号链接逃逸。
-        try:
-            inside = os.path.commonpath(
-                [os.path.realpath(STATIC_DIR), os.path.realpath(full)]
-            ) == os.path.realpath(STATIC_DIR)
-        except (ValueError, OSError):
-            inside = False
-        if not inside or not os.path.isfile(full):
+        search_dirs = []
+        if os.path.isdir(FRONTEND_DIST_DIR):
+            search_dirs.append(FRONTEND_DIST_DIR)
+        search_dirs.append(STATIC_DIR)
+
+        found_file = None
+        for base in search_dirs:
+            full = os.path.normpath(os.path.join(base, rel))
+            try:
+                inside = os.path.commonpath(
+                    [os.path.realpath(base), os.path.realpath(full)]
+                ) == os.path.realpath(base)
+            except (ValueError, OSError):
+                inside = False
+            if inside and os.path.isfile(full):
+                found_file = full
+                break
+
+        if not found_file:
             if rel == "index.html":
                 self._send(PLACEHOLDER_HTML.encode("utf-8"), 200,
                            "text/html; charset=utf-8")
             else:
                 self._send(b"404 Not Found", 404, set_cookie=False)
             return
-        ctype = STATIC_TYPES.get(os.path.splitext(full)[1].lower(),
+        ctype = STATIC_TYPES.get(os.path.splitext(found_file)[1].lower(),
                                  "application/octet-stream")
         try:
-            with open(full, "rb") as f:
+            with open(found_file, "rb") as f:
                 data = f.read()
         except OSError:
             self._send(b"404 Not Found", 404, set_cookie=False)
