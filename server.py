@@ -3693,8 +3693,7 @@ class ConsoleServer(ThreadingHTTPServer):
     def handle_error(self, request, client_address):
         """空闲连接超时 / 客户端中途断开属正常现象，不刷 traceback。"""
         exc_type, exc, _ = sys.exc_info()
-        if exc_type and isinstance(exc, (TimeoutError, BrokenPipeError,
-                                         ConnectionResetError)):
+        if exc_type and isinstance(exc, (TimeoutError, ConnectionError)):
             return
         super().handle_error(request, client_address)
 
@@ -4003,7 +4002,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.serve_icon(path)
                 return
             self.serve_static(path)
-        except (BrokenPipeError, ConnectionResetError):
+        except ConnectionError:
             pass
         except Exception as e:
             self._handle_request_error("GET", e)
@@ -4157,7 +4156,7 @@ class Handler(BaseHTTPRequestHandler):
                     self.handle_fetch_favicon(app_id)
                     return
             self.send_err(404, "接口不存在")
-        except (BrokenPipeError, ConnectionResetError):
+        except ConnectionError:
             pass
         except Exception as e:
             self._handle_request_error("POST", e)
@@ -4713,7 +4712,7 @@ class Handler(BaseHTTPRequestHandler):
                 updated = dict(updated)
                 updated["stoppedForUpdate"] = True
             self.send_json(updated)
-        except (BrokenPipeError, ConnectionResetError):
+        except ConnectionError:
             pass
         except Exception as e:
             self._handle_request_error("PUT", e)
@@ -4740,7 +4739,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.handle_icon_delete(app_id)
                 return
             self.send_err(404, "接口不存在")
-        except (BrokenPipeError, ConnectionResetError):
+        except ConnectionError:
             pass
         except Exception as e:
             self._handle_request_error("DELETE", e)

@@ -31,3 +31,5 @@ release/
 *.zip
 *.tar.gz
 *.sha256
+.workbuddy/memory/2026-09-10.md
+install-autostart.ps1
