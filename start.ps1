@@ -82,7 +82,7 @@ if ($Silent -or $Background) {
     if (-not (Test-Path -LiteralPath $pyw)) {
         $pyw = $pyExe
     }
-    $bgArgs = @("-X", "utf8", "-u", $serverScript, "--launcher")
+    $bgArgs = @("-X", "utf8", "-u", "server.py", "--launcher")
     if ($Port -gt 0) {
         $bgArgs += @("--preferred-port", [string]$Port)
     }
