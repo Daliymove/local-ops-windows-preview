@@ -42,6 +42,16 @@ def _batch_file(command):
     return path
 
 
+def _win_anchor_startupinfo():
+    try:
+        si = subprocess.STARTUPINFO()
+        si.dwFlags |= getattr(subprocess, "STARTF_USESHOWWINDOW", 0x00000001)
+        si.wShowWindow = 0
+        return si
+    except Exception:
+        return None
+
+
 def _live_descendants(root_pid):
     """root 是否有存活后代（含隔代；父进程已退出的孤儿仍按 PPID 命中）。"""
     try:
@@ -51,7 +61,9 @@ def _live_descendants(root_pid):
              "[Console]::OutputEncoding=[Text.Encoding]::UTF8; "
              "Get-CimInstance Win32_Process | "
              "Select-Object ProcessId,ParentProcessId | ConvertTo-Json -Compress"],
-            capture_output=True, timeout=10)
+            capture_output=True, timeout=10,
+            creationflags=CREATE_NO_WINDOW,
+            startupinfo=_win_anchor_startupinfo())
         text = out.stdout.decode("utf-8", errors="replace") or ""
     except Exception:
         return True  # 查询失败时保守认为仍在运行
@@ -92,7 +104,8 @@ def main():
     try:
         proc = subprocess.Popen(
             ["cmd", "/d", "/c", batch],
-            creationflags=CREATE_NO_WINDOW)
+            creationflags=CREATE_NO_WINDOW,
+            startupinfo=_win_anchor_startupinfo())
     except OSError:
         return 1
     try:

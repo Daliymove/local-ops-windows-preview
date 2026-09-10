@@ -651,11 +651,27 @@ def release_instance_lock(lock_file):
 
 # ---------------------------------------------------------------- 子进程与解析
 
+def _win_subprocess_kwargs():
+    """Windows 下彻底隐藏子进程控制台黑框的参数集合。"""
+    if not IS_WIN:
+        return {}
+    kw = {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)}
+    try:
+        si = subprocess.STARTUPINFO()
+        si.dwFlags |= getattr(subprocess, "STARTF_USESHOWWINDOW", 0x00000001)
+        si.wShowWindow = 0  # SW_HIDE
+        kw["startupinfo"] = si
+    except Exception:
+        pass
+    return kw
+
+
 def run_cmd(args, timeout=SUBPROCESS_TIMEOUT):
     """运行命令并返回 stdout；任何异常/超时都返回空串，绝不上抛。"""
     try:
         r = subprocess.run(args, capture_output=True, text=True,
-                           errors="replace", timeout=timeout)
+                           errors="replace", timeout=timeout,
+                           **_win_subprocess_kwargs())
         return r.stdout or ""
     except Exception:
         LOG.exception("命令执行失败: %r", args)
@@ -679,7 +695,8 @@ def _win_powershell(script, timeout=SUBPROCESS_TIMEOUT):
             ["powershell", "-NoProfile", "-NonInteractive",
              "-ExecutionPolicy", "Bypass", "-Command",
              "[Console]::OutputEncoding=[Text.Encoding]::UTF8; " + script],
-            capture_output=True, timeout=timeout)
+            capture_output=True, timeout=timeout,
+            **_win_subprocess_kwargs())
         return r.stdout.decode("utf-8", errors="replace") or ""
     except Exception:
         LOG.exception("PowerShell 执行失败")
@@ -879,7 +896,8 @@ def _win_taskkill(pid, tree=True, force=False):
     args += ["/PID", str(int(pid))]
     try:
         r = subprocess.run(args, capture_output=True, text=True,
-                           errors="replace", timeout=SUBPROCESS_TIMEOUT)
+                           errors="replace", timeout=SUBPROCESS_TIMEOUT,
+                           **_win_subprocess_kwargs())
     except Exception as e:
         return False, "taskkill 失败: %s" % e
     if r.returncode == 0:
@@ -2420,7 +2438,8 @@ $result = {call_expr}
         r = subprocess.run(
             ["powershell", "-NoProfile", "-NonInteractive",
              "-ExecutionPolicy", "Bypass", "-EncodedCommand", encoded],
-            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=180)
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=180,
+            **_win_subprocess_kwargs())
     except Exception:
         return None, False
     if r.returncode != 0:
@@ -5051,6 +5070,7 @@ def stop_frontend_dev_server(proc):
                 ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
+                **_win_subprocess_kwargs(),
             )
         else:
             proc.terminate()
