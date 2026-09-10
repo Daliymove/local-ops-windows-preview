@@ -2,11 +2,11 @@
 
 **Preview / Alpha · 源码预览**
 
-总控台是面向 macOS 与 Windows 的本地服务与批处理任务启动、运行监测工具：把常用项目命令、长期服务和一次性任务集中到本地网页中。后端是 Python 3 标准库单文件实现，前端是无构建、无 CDN 的原生 HTML/CSS/JavaScript，只绑定回环地址。
+总控台是面向 macOS 与 Windows 的本地服务与批处理任务启动、运行监测工具：把常用项目命令、长期服务和一次性任务集中到本地网页中。后端是 Python 3 标准库单文件实现，前端采用 React 19 + TypeScript + Vite + Tailwind CSS v4 现代化架构（兼备原生 static 静态回退），只绑定回环地址。
 
 > 总控台只服务当前机器和当前用户，不是远程运维、多人协作或公网管理面板。它能以当前用户权限执行你保存的命令，请勿通过反向代理、SSH 隧道或端口映射暴露到不受信任的网络。当前仍为 Preview / Alpha 阶段，接口、配置格式和安装方式可能调整；`总控台.app` 是项目内启动器，不是可单独复制的自包含应用。
 
-**📚 文档**：[使用手册](https://github.com/laogou717/local-ops/wiki/使用手册) · [数据与备份](https://github.com/laogou717/local-ops/wiki/数据与备份) · [故障排查](https://github.com/laogou717/local-ops/wiki/故障排查) · [开发者与发布指南](https://github.com/laogou717/local-ops/wiki/开发者与发布指南) · [Wiki 主页](https://github.com/laogou717/local-ops/wiki)
+**📚 文档中心**：[📖 本地文档中心 (docs/)](docs/README.md) · [🪟 Windows 实战指南](docs/WINDOWS_GUIDE.md) · [🏛️ 系统架构全景](docs/ARCHITECTURE.md) · [⚛️ 前端重构报告](docs/FRONTEND_REFACTOR_WALKTHROUGH.md) · [🌐 上游 Wiki](https://github.com/laogou717/local-ops/wiki)
 
 ## 亮点
 
@@ -25,17 +25,20 @@
 
 ## 快速开始
 
-**要求**：macOS 12 或更高，或 Windows 10/11（64 位）；Python 3.12；支持 ES Modules 的现代浏览器。运行时仅使用 Python 标准库，无需安装任何第三方包。macOS 使用自带的 `ps`、`lsof`、`osascript`；Windows 使用自带的 `netstat`、`taskkill`、PowerShell 5.1。（`VERSION` 是项目版本的唯一权威来源，`Info.plist`、发行包名和发行说明应与它保持一致。）
+**要求**：macOS 12 或更高，或 Windows 10/11（64 位）；Python 3.12+；现代浏览器。运行时仅使用 Python 标准库，无需安装任何第三方包。macOS 使用自带的 `ps`、`lsof`、`osascript`；Windows 使用自带的 `netstat`、`taskkill`、PowerShell 5.1。
 
-启动方式有三种，效果相同，按习惯选择：
+启动方式按平台与习惯选择：
 
-| 方式 | 操作 | 适用场景 |
-| --- | --- | --- |
-| 双击应用 | 双击 `总控台.app` | macOS 日常使用。后台运行，无 Terminal 窗口和 Dock 图标 |
-| 双击脚本 | 双击 `start.command`（macOS）/ `start.bat`（Windows） | 想在终端窗口里看实时输出 |
-| 命令行 | `python3 server.py`（macOS）/ `py -3 server.py`（Windows） | 调试、脚本化或远程启动 |
+| 平台 | 方式 | 操作 / 入口 | 适用场景 |
+| :--- | :--- | :--- | :--- |
+| **Windows** | **原生快捷方式 (推荐)** | 双击根目录 **`总控台.lnk`** | **日常高频使用**。后台静默运行，完全零 CMD 黑框，带品牌图标 |
+| **Windows** | 命令行 / 交互式 | 双击 `start.cmd`（或 `start.bat`） | 终端查看日志，按 `Ctrl+C` 退出；支持 `start.cmd /b` 后台运行 |
+| **Windows** | 一键安全停止 | 双击 `stop.cmd`（或 `stop.bat`） | 安全通知后台总控台停止并释放端口 |
+| **macOS** | 双击应用 | 双击 `总控台.app` | macOS 日常使用。后台运行，无 Terminal 窗口和 Dock 图标 |
+| **macOS** | 双击脚本 | 双击 `start.command` | 想在终端窗口里看实时输出 |
+| **通用** | 命令行启动 | `py -3 server.py`（Win）/ `python3 server.py`（Mac） | 调试、脚本化或远程启动 |
 
-命令行可选参数：`--no-browser`、`--preferred-port 9603`。
+命令行可选参数：`--no-browser`、`--preferred-port 9603`、`--stop`。
 
 首次打开互联网下载的 `总控台.app`，右键 → 打开（点「打开」），或执行 `xattr -dr com.apple.quarantine "总控台.app"`，只需一次。这是 macOS 对互联网下载应用的常规隔离提示，不是程序损坏；解压后请保持目录结构完整，不要单独移动 `总控台.app`。
 
@@ -43,15 +46,18 @@
 
 ## Windows 适配说明
 
-本 fork 的 `main` 已合入 [dontpanic1/local-ops](https://github.com/dontpanic1/local-ops) 的 Windows 10/11 适配（对应上游 PR [#2](https://github.com/laogou717/local-ops/pull/2)），并修复了 `start.bat` 走 `--launcher` 时在 cmd 窗口出现「句柄无效」的问题。平台差异如下：
+本 fork 的 `main` 在 Windows 10/11 上实现了深度的原生级体验对齐与加固：
 
+- **后台静默与快捷方式**：提供 `总控台.lnk` 原生快捷方式和 `start.cmd /b`，彻底告别必须常驻黑色 CMD 窗口的历史。
+- **根治 CMD 弹窗闪烁**：所有系统调用（`netstat`、`taskkill`、PowerShell 查询及服务进程）均注入 `CREATE_NO_WINDOW (0x08000000)` 与 `STARTF_USESHOWWINDOW`，页面轮询刷新时完全无闪烁黑框。
 - **受控进程模型**：Windows 没有进程组/信号。每个应用由一个小型 Python “锚点”进程承载（`tools/win_anchor.py`，命令行带随机 token），用户命令写入临时 `.cmd` 批处理文件后由 `cmd /c` 执行。受控身份 = 锚点 PID + token 命令行 + PPID 后代树；锚点会等到整棵进程树清空才退出（等价于 macOS 的 `wait`）。
-- **停止语义**：Windows 没有 SIGTERM。点“停止”会先尝试 `taskkill /T`，失败自动升级为 `taskkill /T /F` 强制结束整棵进程树。被停止的应用不会收到优雅退出通知，正在写入的数据可能丢失。
+- **停止语义**：点“停止”或运行 `stop.cmd`，会先尝试 `taskkill /T`，失败自动升级为 `taskkill /T /F` 强制结束整棵进程树。
 - **进程扫描**：`lsof`/`ps` 换成 `netstat -ano -p tcp` 与 PowerShell `Get-CimInstance Win32_Process`；CPU% 在 Windows 上暂不提供（置 0），内存使用 WorkingSet 占比。
 - **工作目录读取**：通过 `NtQueryInformationProcess` 读 PEB（ctypes，只读）；同架构进程可读，被拒绝访问时该进程不显示目录。
 - **文件选择框**：PowerShell + WinForms 原生对话框（目录/文件）。
-- **数据目录**：Windows 默认 `%APPDATA%\总控台`（配置/图标）与 `%LOCALAPPDATA%\总控台\Logs`（日志）；同样支持 `CONSOLE_DATA_DIR`/`CONSOLE_LOG_DIR` 覆盖。Windows 无 POSIX 权限位，目录/文件安全由 NTFS ACL 保障。
+- **数据目录**：Windows 默认 `%APPDATA%\总控台`（配置/图标）与 `%LOCALAPPDATA%\总控台\Logs`（日志）；同样支持 `CONSOLE_DATA_DIR`/`CONSOLE_LOG_DIR` 覆盖。
 - **启动台自动识别**：Windows 上 Python 项目使用 `python`/`py -3` 运行器，并额外识别 `start.bat`/`dev.bat`/`start.cmd`/`start.ps1` 等启动脚本。
+- **现代化前端与自构建**：`start.ps1` 启动器内置源码增量对账，检测到 `frontend/src` 更新时自动毫秒级构建。完整指南见 [docs/WINDOWS_GUIDE.md](docs/WINDOWS_GUIDE.md)。
 
 ## 使用
 

@@ -10,6 +10,20 @@
 
 ### Added
 
+- **现代前端重构 (React 19 + TypeScript + Vite + Tailwind CSS v4)**：
+  - 前端工程从原生无构建 ES Modules 彻底升级为 React 19 + TS + Vite 8 + Tailwind CSS v4 现代化架构。
+  - 核心模块分层清晰，严格类型定义（`src/types/console.ts`）与后端 API 100% 对齐。
+  - 后端 `server.py` 实现双轨伺服：优先提供 `frontend/dist` 编译产物，开发或纯 Python 环境下无缝平滑回退至 `static/` 原生前端。
+  - 增加 `useConsoleState` 轮询 Hooks，支持 `mutationEpoch` 代际保护杜绝状态闪烁，支持任务四态完成 Toast 通知。
+- **Windows 原生静默后台运行与入口规范**：
+  - 新增 `总控台.lnk` 原生快捷方式（绑定品牌 Favicon 图标），支持双击后台静默拉起，完全零 CMD 弹窗与黑框。
+  - `start.cmd` 新增 `/b` 参数支持命令行后台静默启动；新增配套优雅停止脚本 `stop.cmd`。
+  - `start.ps1` 统一作为 Windows 单一真实源调度器，支持源码增量对比自构建、Python 绝对路径解析与路径空格防护。
+  - 清理根目录历史排查产生的冗余 VBS/批处理脚本，规范化 Windows 入口。
+- **根除 Windows 子进程黑色弹窗闪烁**：
+  - 所有后台系统命令（`netstat`、`taskkill`、PowerShell CIM、`tools/win_anchor.py` 及用户服务进程）全面注入 `CREATE_NO_WINDOW (0x08000000)` 与 `STARTF_USESHOWWINDOW`，彻底解决 2 秒轮询时桌面持续弹出黑框的问题。
+- **建立体系化项目文档中心 (`docs/`)**：
+  - 建立 `docs/` 文档目录，包含架构全景 (`ARCHITECTURE.md`)、Windows 实战指南 (`WINDOWS_GUIDE.md`)、前端重构方案 (`FRONTEND_REFACTOR_PLAN.md`) 与验收总结 (`FRONTEND_REFACTOR_WALKTHROUGH.md`)。
 - 启动台服务编辑新增「本地打开链接」：默认「地址+端口」，也可自定义路径或完整本机 URL（例如 `/daliymove-tech-share/`），打开/复制按该配置跳转。
 - **Windows 10/11 适配**：后端可在 Windows 上完整运行（Python 3.12 标准库）。
   - 进程扫描改用 `netstat -ano -p tcp` 与 PowerShell `Get-CimInstance`（CPU% 暂置 0，内存用 WorkingSet 占比）。
