@@ -9,6 +9,8 @@ Windows：
 API 契约与实现要点见 AGENTS.md。
 """
 
+import atexit
+import base64
 import glob
 import functools
 import errno
@@ -105,6 +107,8 @@ ICONS_DIR = os.path.join(DATA_DIR, "icons")
 LOGS_DIR, LOGS_DIR_OVERRIDDEN = resolve_runtime_dir(
     "CONSOLE_LOG_DIR", DEFAULT_LOGS_DIR)
 STATIC_DIR = os.path.join(BASE_DIR, "static")
+FRONTEND_DIR = os.path.join(BASE_DIR, "frontend")
+FRONTEND_DIST_DIR = os.path.join(FRONTEND_DIR, "dist")
 THEMES_DIR = os.path.join(STATIC_DIR, "themes")
 CONFIG_PATH = os.path.join(DATA_DIR, "config.json")
 INSTANCE_LOCK_PATH = os.path.join(DATA_DIR, "console.lock")
@@ -688,7 +692,7 @@ def _win_quote(value):
 
 
 def _parse_win_process_table_json(text):
-    """CIM ConvertTo-Json 文本 → {pid: {ppid, args, name, exe, created, ws}}。"""
+    """CIM ConvertTo-Json 文本 → {pid: {ppid, args, name, exe, created, ws, kernel_time, user_time}}。"""
     if not text or not text.strip():
         return {}
     try:
@@ -714,21 +718,25 @@ def _parse_win_process_table_json(text):
             "args": item.get("CommandLine") or "",
             "created": item.get("CreationDate") or "",
             "ws": item.get("WorkingSetSize"),
+            "kernel_time": item.get("KernelModeTime"),
+            "user_time": item.get("UserModeTime"),
         }
     return table
 
 
 def _win_process_table():
-    """一次性 CIM 快照 → {pid: {ppid, args, name, exe, created, ws}}。"""
+    """一次性 CIM 快照 → {pid: {ppid, args, name, exe, created, ws, kernel_time, user_time}}。"""
     script = (
         "Get-CimInstance Win32_Process | "
         "Select-Object ProcessId,ParentProcessId,Name,ExecutablePath,"
-        "CommandLine,CreationDate,WorkingSetSize | ConvertTo-Json -Compress")
+        "CommandLine,CreationDate,WorkingSetSize,KernelModeTime,UserModeTime | "
+        "ConvertTo-Json -Compress")
     return _parse_win_process_table_json(
         _win_powershell(script, timeout=SUBPROCESS_TIMEOUT * 2))
 
 
 _WIN_TOTAL_MEM_CACHE = {"mono": 0.0, "kb": 0.0}
+_WIN_CPU_SAMPLES = {}  # {pid: (mono_time, total_cpu_100ns, created_str)}
 
 
 def _win_total_memory_kb():
@@ -751,11 +759,14 @@ _WIN_EPOCH = 116444736000000000  # 1601-01-01 → 1970-01-01（100ns 单位）
 
 
 def _win_parse_creation(created):
-    """CIM CreationDate (ISO 或 WMI DMTF 格式) → 创建时间戳秒；失败返回 None。"""
+    """CIM CreationDate (ISO, WMI DMTF 或 /Date(...) 格式) → 创建时间戳秒；失败返回 None。"""
     if not created:
         return None
     text = str(created)
     try:
+        m_date = re.search(r"/Date\((\d+)(?:[+-]\d+)?\)/", text)
+        if m_date:
+            return int(m_date.group(1)) / 1000.0
         if text.endswith("+000") or "T" in text:
             from datetime import datetime
             parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
@@ -1067,13 +1078,15 @@ def ps_snapshot(pids=None, with_uid=True):
 def _ps_snapshot_windows(pids=None):
     """CIM 快照 → 与 ps_snapshot 相同结构。
 
-    Windows 无 CPU% 瞬时值（需两次采样），v1 置 0；mem 用 WorkingSet 占比。
+    Windows CPU%：通过 KernelModeTime + UserModeTime（100ns）两趟差值采样；
+    初次采样时按生命周期均值估算。mem 用 WorkingSet 占比。
     uid 统一为 0（本机单用户语义，与其他用户进程的隔离交给 taskkill 权限）。
     """
     table = _win_process_table()
     if not table:
         return {}
     total_kb = _win_total_memory_kb()
+    now = time.monotonic()
     result = {}
     for pid, info in table.items():
         if pids is not None and pid not in pids:
@@ -1084,14 +1097,47 @@ def _ps_snapshot_windows(pids=None):
         except (TypeError, ValueError):
             ws_bytes = 0.0
         mem = (ws_bytes / 1024.0 / total_kb * 100.0) if total_kb else 0.0
+
+        k_time = info.get("kernel_time") or 0
+        u_time = info.get("user_time") or 0
+        try:
+            total_cpu_100ns = int(k_time) + int(u_time)
+        except (TypeError, ValueError):
+            total_cpu_100ns = 0
+
+        created_raw = info.get("created")
+        etime = _win_etime(created_raw)
+        cpu_val = 0.0
+
+        if total_cpu_100ns > 0:
+            if pid in _WIN_CPU_SAMPLES:
+                prev_time, prev_cpu, prev_created = _WIN_CPU_SAMPLES[pid]
+                if prev_created == created_raw:
+                    dt = now - prev_time
+                    dcpu_100ns = total_cpu_100ns - prev_cpu
+                    if dt > 0.1 and dcpu_100ns >= 0:
+                        dcpu_sec = dcpu_100ns / 10000000.0
+                        cpu_val = max(0.0, round((dcpu_sec / dt) * 100.0, 1))
+            if cpu_val == 0.0 and etime > 0:
+                dcpu_sec = total_cpu_100ns / 10000000.0
+                cpu_val = max(0.0, round((dcpu_sec / etime) * 100.0, 1))
+            _WIN_CPU_SAMPLES[pid] = (now, total_cpu_100ns, created_raw)
+
         result[pid] = {
             "uid": 0,
             "comm": info.get("exe") or info.get("name") or "",
             "args": info.get("args") or "",
-            "cpu": 0.0,
+            "cpu": cpu_val,
             "mem": round(mem, 2),
-            "etime": _win_etime(info.get("created")),
+            "etime": etime,
         }
+
+    if len(_WIN_CPU_SAMPLES) > len(table) * 2:
+        alive_pids = set(table.keys())
+        for old_pid in list(_WIN_CPU_SAMPLES.keys()):
+            if old_pid not in alive_pids:
+                _WIN_CPU_SAMPLES.pop(old_pid, None)
+
     return result
 
 
@@ -1289,6 +1335,38 @@ def origin_snapshot():
     return table
 
 
+def _match_origin_agent(parent_args):
+    """从父进程命令行中精准匹配已知 AI 助手，避免把工作区目录名误当成启动者。"""
+    if not parent_args:
+        return None
+    # 拆分前几个 token（可执行文件路径与直接参数）
+    parts = parent_args.split()[:5]
+    bases = []
+    for p in parts:
+        clean = p.strip("\"'").strip()
+        if not clean or clean.startswith("-"):
+            continue
+        base = os.path.basename(clean).casefold()
+        for ext in (".exe", ".cmd", ".bat", ".ps1", ".sh", ".js", ".mjs", ".py"):
+            if base.endswith(ext):
+                base = base[:-len(ext)]
+                break
+        bases.append(base)
+
+    for base in bases:
+        for pattern, label in _ORIGIN_AGENT_PATTERNS:
+            if pattern.search(base):
+                return {"label": label, "icon": "bot"}
+
+    hay = parent_args.casefold()
+    for pattern, label in _ORIGIN_AGENT_PATTERNS:
+        pat_str = pattern.pattern
+        if "cursor-agent" in pat_str or "claude-code" in pat_str:
+            if pattern.search(hay):
+                return {"label": label, "icon": "bot"}
+    return None
+
+
 def attribute_origin(pid, table):
     """沿 PPID 链识别来源应用，返回 {"label", "icon"} 或 None。
 
@@ -1298,24 +1376,31 @@ def attribute_origin(pid, table):
     总控台 / launchd 是更优答案，都没有时才以最近的未识别进程命名。
     最多上爬 12 层，遇到环或缺失即终止。
     """
-    cur, seen, candidate = pid, set(), None
+    cur, seen = pid, set()
+    chain = []
+    # 阶段 1：向上爬取整条祖先链（至多 12 层），且优先全链检测是否存在总控台守护标记
     for _ in range(12):
         entry = table.get(cur)
         if not entry:
             break
         ppid, _ = entry
-        if ppid in seen:
+        if ppid in seen or ppid <= 0:
             break
         seen.add(ppid)
         parent_args = (table.get(ppid) or (0, ""))[1] or ""
-        if ppid <= 1:
-            return candidate or {"label": "系统", "icon": "server"}
+        chain.append((ppid, parent_args))
         if RUN_TOKEN_ARG_PREFIX in parent_args:
             return {"label": "总控台", "icon": "rocket"}
-        hay = parent_args.casefold()
-        for pattern, label in _ORIGIN_AGENT_PATTERNS:
-            if pattern.search(hay):
-                return {"label": label, "icon": "bot"}
+        cur = ppid
+
+    # 阶段 2：在确认整条祖先链没有总控台标记后，从最近父进程向上匹配来源
+    candidate = None
+    for ppid, parent_args in chain:
+        if ppid <= 1:
+            return candidate or {"label": "系统", "icon": "server"}
+        agent = _match_origin_agent(parent_args)
+        if agent:
+            return agent
         bundle = _ORIGIN_BUNDLE_RE.search(parent_args)
         if bundle:
             app_name = bundle.group(1)
@@ -1328,7 +1413,7 @@ def attribute_origin(pid, table):
             return {"label": _ORIGIN_MULTIPLEXERS[base], "icon": "terminal"}
         if base and base not in _ORIGIN_SKIP_NAMES and candidate is None:
             candidate = {"label": base, "icon": "package"}
-        cur = ppid
+
     return candidate
 
 
@@ -1363,6 +1448,9 @@ def build_services(cfg, groups=None):
         key = "%s:%d" % (name, port)
         cwd = cwds.get(pid)
         app = app_by_pid.get(pid)
+        origin = attribute_origin(pid, origin_table)
+        if app and not app.get("attached") and (not origin or origin.get("label") != "总控台"):
+            origin = {"label": "总控台", "icon": "rocket"}
         services.append({
             "key": key,
             # key 保持 name:port 以兼容既有隐藏/置顶配置；instanceKey 用于
@@ -1378,8 +1466,59 @@ def build_services(cfg, groups=None):
             "appId": app["id"] if app else None,
             "appName": app["name"] if app else None,
             # 来源溯源（尽力判断）：哪个应用/AI 助手启动了这个进程
-            "origin": attribute_origin(pid, origin_table),
+            "origin": origin,
         })
+
+    def _is_system_service(s):
+        origin = s.get("origin") or {}
+        origin_label = origin.get("label") or ""
+        if origin_label in ("系统", "System"):
+            return True
+        if s.get("group") == "background":
+            return True
+        name = (s.get("name") or "").lower()
+        if name in ("system", "spoolsv.exe", "lsass.exe", "wininit.exe",
+                    "csrss.exe", "services.exe", "smss.exe", "launchd", "kernel_task"):
+            return True
+        if name.startswith("svchost"):
+            return True
+        cmd = (s.get("cmd") or "").lower()
+        cwd = (s.get("cwd") or "").lower()
+        if "\\windows\\system32\\" in cmd or "\\windows\\syswow64\\" in cmd:
+            return True
+        if "\\windows\\system32\\" in cwd:
+            return True
+        if cmd.startswith(("/system/", "/usr/libexec/", "/usr/sbin/", "/sbin/")):
+            return True
+        return False
+
+    def _is_console_service(s):
+        origin = s.get("origin") or {}
+        return bool(s.get("appId") or origin.get("label") == "总控台")
+
+    def _service_sort_key(s):
+        pinned = bool(s.get("pinned"))
+        is_console = _is_console_service(s)
+        is_system = _is_system_service(s)
+
+        if pinned:
+            tier = 0
+            sub_tier = 0 if is_console else (2 if is_system else 1)
+        elif is_console:
+            tier = 1
+            sub_tier = 0
+        elif not is_system:
+            tier = 2
+            sub_tier = 0
+        else:
+            tier = 3
+            sub_tier = 0
+
+        port = s.get("port") if s.get("port") is not None else 999999
+        name = s.get("name") or ""
+        return (tier, sub_tier, port, name)
+
+    services.sort(key=_service_sort_key)
     return services, listeners
 
 
@@ -1637,11 +1776,32 @@ def build_apps(cfg, listeners, groups=None):
         except Exception as exc:
             LOG.warning("检查应用配置失败（%s）：%s", app.get("id"), exc)
             health = {"status": "unknown", "blocking": False, "issues": []}
+
+        icon_type = app.get("iconType")
+        icon_path = app.get("iconSourcePath")
+        if app.get("icon"):
+            if not icon_type and app.get("cwd"):
+                preset = _detect_project_favicon(app["cwd"])
+                if preset:
+                    icon_type = "preset"
+                    icon_path = preset["fullPath"]
+                else:
+                    icon_type = "custom"
+                    icon_path = os.path.join(ICONS_DIR, os.path.basename(app["icon"]))
+            elif icon_type == "preset" and not icon_path and app.get("cwd"):
+                preset = _detect_project_favicon(app["cwd"])
+                if preset:
+                    icon_path = preset["fullPath"]
+            elif not icon_path:
+                icon_path = os.path.join(ICONS_DIR, os.path.basename(app["icon"]))
+
         apps.append({
             "id": app["id"], "name": app["name"], "command": app["command"],
             "cwd": app.get("cwd"), "port": port, "openUrl": app.get("openUrl"),
             "emoji": app.get("emoji"), "glyph": app.get("glyph"), "icon": app.get("icon"),
             "favicon": app.get("favicon"),
+            "iconType": icon_type,
+            "iconPath": icon_path,
             "running": bool(live), "pid": pid,
             "uptimeSec": ((snap.get(pid) or listener_snap.get(pid) or {}).get("etime")
                           if pid else None),
@@ -1703,6 +1863,7 @@ def build_state(cfg, console_port, config_health=None):
         "consolePort": console_port,
         "consolePid": SELF_PID,
         "consoleCwd": BASE_DIR,
+        "iconsDir": ICONS_DIR,
         "platform": sys.platform,
         "version": APP_VERSION,
         "schemaVersion": cfg.get("schemaVersion", CURRENT_SCHEMA_VERSION),
@@ -2096,47 +2257,170 @@ def stop_app_for_update(cfg, app, timeout=5.0):
     return ok, error, bool(ok)
 
 
-def pick_path(what):
-    """macOS 原生文件/目录选择框（osascript）。返回 (path|None, canceled)。"""
-    if IS_WIN:
-        return _pick_path_windows(what)
-    if what == "dir":
-        script = 'POSIX path of (choose folder with prompt "选择工作目录")'
-    else:
-        script = 'POSIX path of (choose file with prompt "选择批处理脚本")'
-    try:
-        r = subprocess.run(["osascript", "-e", script],
-                           capture_output=True, text=True, timeout=180)
-    except Exception:
-        return None, False
-    if r.returncode != 0:  # 用户按了取消（"User canceled."）
+_pick_lock = threading.Lock()
+
+
+def pick_path(what, initial_dir=""):
+    """macOS / Windows 原生文件/目录选择框。返回 (path|None, canceled)。"""
+    if not _pick_lock.acquire(blocking=False):
+        # 避免并发打开多个原生对话框导致相互刷新和冲突
         return None, True
-    return r.stdout.strip().rstrip("/") or None, False
-
-
-def _pick_path_windows(what):
-    """Windows 原生对话框（PowerShell + WinForms）。返回 (path|None, canceled)。"""
-    if what == "dir":
-        script = (
-            "Add-Type -AssemblyName System.Windows.Forms; "
-            "$f = New-Object System.Windows.Forms.FolderBrowserDialog; "
-            "$f.Description = '选择工作目录'; "
-            "$f.ShowNewFolderButton = $true; "
-            "if ($f.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) "
-            "{ $f.SelectedPath } else { '__CANCELED__' }")
-    else:
-        script = (
-            "Add-Type -AssemblyName System.Windows.Forms; "
-            "$f = New-Object System.Windows.Forms.OpenFileDialog; "
-            "$f.Title = '选择批处理脚本'; "
-            "$f.Filter = '脚本文件 (*.py;*.ps1;*.bat;*.cmd;*.sh)|*.py;*.ps1;*.bat;*.cmd;*.sh|所有文件 (*.*)|*.*'; "
-            "if ($f.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) "
-            "{ $f.FileName } else { '__CANCELED__' }")
     try:
+        if IS_WIN:
+            return _pick_path_windows(what, initial_dir)
+        if what == "dir":
+            if initial_dir and os.path.isdir(initial_dir):
+                safe_init = initial_dir.replace('"', '\\"')
+                script = f'POSIX path of (choose folder with prompt "选择工作目录" default location POSIX file "{safe_init}")'
+            else:
+                script = 'POSIX path of (choose folder with prompt "选择工作目录")'
+        else:
+            if initial_dir and os.path.isdir(initial_dir):
+                safe_init = initial_dir.replace('"', '\\"')
+                script = f'POSIX path of (choose file with prompt "选择批处理脚本" default location POSIX file "{safe_init}")'
+            else:
+                script = 'POSIX path of (choose file with prompt "选择批处理脚本")'
+        try:
+            r = subprocess.run(["osascript", "-e", script],
+                               capture_output=True, text=True, timeout=180)
+        except Exception:
+            return None, False
+        if r.returncode != 0:  # 用户按了取消（"User canceled."）
+            return None, True
+        return r.stdout.strip().rstrip("/") or None, False
+    finally:
+        _pick_lock.release()
+
+
+def _pick_path_windows(what, initial_dir=""):
+    """Windows 原生对话框（高分辨率 Per-Monitor V2 + 现代资源管理器 Explorer 风格）。返回 (path|None, canceled)。"""
+    csharp_code = r'''
+using System;
+using System.Reflection;
+using System.Windows.Forms;
+using System.Runtime.InteropServices;
+
+public class NativePicker {
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool SetProcessDpiAwarenessContext(IntPtr dpiContext);
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr GetForegroundWindow();
+
+    private static readonly IntPtr DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 = new IntPtr(-4);
+
+    public static void EnableHighDpi() {
+        try {
+            SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+        } catch {}
+        try {
+            Application.EnableVisualStyles();
+        } catch {}
+    }
+
+    public static string ShowFolder(string title, string initialDir) {
+        EnableHighDpi();
+        OpenFileDialog ofd = new OpenFileDialog();
+        ofd.Title = string.IsNullOrEmpty(title) ? "选择工作目录" : title;
+        ofd.Filter = "文件夹|*.none";
+        ofd.AddExtension = false;
+        ofd.CheckFileExists = false;
+        ofd.DereferenceLinks = true;
+        ofd.AutoUpgradeEnabled = true;
+        if (!string.IsNullOrEmpty(initialDir) && System.IO.Directory.Exists(initialDir)) {
+            ofd.InitialDirectory = initialDir;
+        }
+
+        try {
+            Assembly asm = typeof(OpenFileDialog).Assembly;
+            Type ifdType = asm.GetType("System.Windows.Forms.FileDialogNative+IFileDialog");
+            Type fosType = asm.GetType("System.Windows.Forms.FileDialogNative+FOS");
+            Type sType = asm.GetType("System.Windows.Forms.FileDialogNative+IShellItem");
+            Type sigdnType = asm.GetType("System.Windows.Forms.FileDialogNative+SIGDN");
+
+            BindingFlags flags = BindingFlags.Instance | BindingFlags.NonPublic;
+            object ifd = ofd.GetType().GetMethod("CreateVistaDialog", flags).Invoke(ofd, null);
+            uint options = (uint)typeof(FileDialog).GetMethod("GetOptions", flags).Invoke(ofd, null);
+            uint fosPickFolders = (uint)Enum.Parse(fosType, "FOS_PICKFOLDERS");
+            options |= fosPickFolders;
+            ifdType.GetMethod("SetOptions").Invoke(ifd, new object[] { Enum.ToObject(fosType, options) });
+
+            IntPtr owner = GetForegroundWindow();
+            int hr = (int)ifdType.GetMethod("Show").Invoke(ifd, new object[] { owner });
+            if (hr == 0) {
+                object[] getResultArgs = new object[] { null };
+                ifdType.GetMethod("GetResult").Invoke(ifd, getResultArgs);
+                object shellItem = getResultArgs[0];
+                if (shellItem != null) {
+                    object sigdn = Enum.Parse(sigdnType, "SIGDN_FILESYSPATH");
+                    object[] getDisplayNameArgs = new object[] { sigdn, null };
+                    sType.GetMethod("GetDisplayName").Invoke(shellItem, getDisplayNameArgs);
+                    return (string)getDisplayNameArgs[1];
+                }
+            }
+            return "__CANCELED__";
+        } catch {
+            try {
+                FolderBrowserDialog fbd = new FolderBrowserDialog();
+                fbd.Description = title ?? "选择工作目录";
+                fbd.ShowNewFolderButton = true;
+                if (fbd.ShowDialog() == DialogResult.OK) {
+                    return fbd.SelectedPath;
+                }
+            } catch {}
+            return "__CANCELED__";
+        }
+    }
+
+    public static string ShowScript(string title, string filter, string initialDir) {
+        EnableHighDpi();
+        OpenFileDialog ofd = new OpenFileDialog();
+        ofd.Title = string.IsNullOrEmpty(title) ? "选择批处理脚本" : title;
+        ofd.Filter = string.IsNullOrEmpty(filter) ? "脚本文件 (*.py;*.ps1;*.bat;*.cmd;*.sh)|*.py;*.ps1;*.bat;*.cmd;*.sh|所有文件 (*.*)|*.*" : filter;
+        ofd.CheckFileExists = true;
+        ofd.AutoUpgradeEnabled = true;
+        if (!string.IsNullOrEmpty(initialDir) && System.IO.Directory.Exists(initialDir)) {
+            ofd.InitialDirectory = initialDir;
+        }
+        try {
+            NativeWindow win = new NativeWindow();
+            IntPtr owner = GetForegroundWindow();
+            if (owner != IntPtr.Zero) {
+                win.AssignHandle(owner);
+            }
+            DialogResult res = ofd.ShowDialog(win);
+            if (owner != IntPtr.Zero) {
+                win.ReleaseHandle();
+            }
+            return res == DialogResult.OK ? ofd.FileName : "__CANCELED__";
+        } catch {
+            return "__CANCELED__";
+        }
+    }
+}
+'''
+    safe_dir = str(initial_dir).replace("'", "''") if initial_dir else ""
+    if what == "dir":
+        call_expr = f"[NativePicker]::ShowFolder('选择工作目录', '{safe_dir}')"
+    else:
+        call_expr = f"[NativePicker]::ShowScript('选择批处理脚本', '脚本文件 (*.py;*.ps1;*.bat;*.cmd;*.sh)|*.py;*.ps1;*.bat;*.cmd;*.sh|所有文件 (*.*)|*.*', '{safe_dir}')"
+
+    ps_script = f"""$ProgressPreference = 'SilentlyContinue'
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+$code = @'
+{csharp_code}
+'@
+Add-Type -TypeDefinition $code -ReferencedAssemblies "System.Windows.Forms"
+[NativePicker]::EnableHighDpi()
+$result = {call_expr}
+[Console]::WriteLine($result)
+"""
+    try:
+        encoded = base64.b64encode(ps_script.encode("utf-16le")).decode("ascii")
         r = subprocess.run(
             ["powershell", "-NoProfile", "-NonInteractive",
-             "-ExecutionPolicy", "Bypass", "-Command", script],
-            capture_output=True, text=True, errors="replace", timeout=180)
+             "-ExecutionPolicy", "Bypass", "-EncodedCommand", encoded],
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=180)
     except Exception:
         return None, False
     if r.returncode != 0:
@@ -2144,7 +2428,8 @@ def _pick_path_windows(what):
     text = r.stdout.strip()
     if text == "__CANCELED__":
         return None, True
-    return text.rstrip("/") or None, False
+    return text.rstrip("/\\") or None, False
+
 
 
 def command_for_script(path):
@@ -2409,6 +2694,63 @@ def _package_default_port(script_name, command, dependencies):
     return None
 
 
+def sniff_image(data):
+    """magic bytes 校验 → "png" / "jpg" / "webp" / None。"""
+    if len(data) >= 8 and data[:8] == b"\x89PNG\r\n\x1a\n":
+        return "png"
+    if len(data) >= 3 and data[:3] == b"\xff\xd8\xff":
+        return "jpg"
+    if len(data) >= 12 and data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "webp"
+    return None
+
+
+def sniff_icon_bytes(data, ctype=""):
+    """→ "png" / "jpg" / "webp" / "ico" / None。拒绝主动 SVG 内容。"""
+    if len(data) >= 4 and (data[:4] == b"\x00\x00\x01\x00" or data[:4] == b"\x00\x00\x02\x00"):
+        return "ico"
+    if len(data) >= 6 and data[:2] == b"\x00\x00" and data[2] in (1, 2) and data[3] == 0:
+        return "ico"
+    ext = sniff_image(data)
+    if ext:
+        return ext
+    if ctype and any(t in ctype.lower() for t in ("image/x-icon", "image/vnd.microsoft.icon", "image/ico")):
+        return "ico"
+    return None
+
+
+def _detect_project_favicon(root):
+    """检测项目目录下的预设图标（必须位于 public/ 目录且以 favicon 命名，如 favicon.ico/png/webp）。"""
+    candidates = (
+        ("public/favicon.ico", ("public", "favicon.ico")),
+        ("public/favicon.png", ("public", "favicon.png")),
+        ("public/favicon.webp", ("public", "favicon.webp")),
+        ("public/favicon.jpg", ("public", "favicon.jpg")),
+        ("public/favicon.jpeg", ("public", "favicon.jpeg")),
+    )
+    for rel_name, parts in candidates:
+        full_path = os.path.join(root, *parts)
+        if os.path.isfile(full_path):
+            try:
+                if os.path.getsize(full_path) > 1024 * 1024:
+                    continue
+                with open(full_path, "rb") as f:
+                    raw = f.read()
+                kind = sniff_icon_bytes(raw)
+                if kind:
+                    mime = "image/x-icon" if kind == "ico" else ("image/jpeg" if kind == "jpg" else f"image/{kind}")
+                    b64 = base64.b64encode(raw).decode("ascii")
+                    return {
+                        "source": rel_name,
+                        "fullPath": full_path,
+                        "dataUrl": f"data:{mime};base64,{b64}",
+                        "kind": kind,
+                    }
+            except OSError:
+                continue
+    return None
+
+
 def detect_project(root):
     """只读分析项目根目录，返回可由启动台直接使用的启动候选。"""
     if not isinstance(root, str) or not root.strip():
@@ -2631,12 +2973,16 @@ def detect_project(root):
         add(py_module + " http.server 8000", "静态网站预览", "index.html", 8000, 90)
 
     candidates.sort(key=lambda item: item.pop("_priority"))
+    favicon_info = _detect_project_favicon(root)
+    if favicon_info:
+        note_file(favicon_info["source"])
     return {
         "ok": True,
         "cwd": root,
         "name": os.path.basename(root) or root,
         "files": detected_files,
         "candidates": candidates[:8],
+        "presetIcon": favicon_info,
     }, None
 
 
@@ -2917,9 +3263,39 @@ def _tail_file_lines(path, count, block_size=65536):
                 chunks.append(chunk)
                 newlines += chunk.count(b"\n")
         data = b"".join(reversed(chunks))
-        return data.decode("utf-8", errors="replace").splitlines()[-count:]
+        return _decode_log_lines(data, count)
     except OSError:
         return []
+
+
+def _decode_log_line(raw):
+    if not raw:
+        return ""
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        pass
+    try:
+        return raw.decode("gb18030")
+    except UnicodeDecodeError:
+        pass
+    try:
+        import locale
+        enc = locale.getpreferredencoding(False)
+        if enc and enc.lower().replace("-", "").replace("_", "") not in (
+                "utf8", "gb18030", "gbk", "cp936"):
+            return raw.decode(enc)
+    except Exception:
+        pass
+    return raw.decode("utf-8", errors="replace")
+
+
+def _decode_log_lines(data, count):
+    if not data:
+        return []
+    raw_lines = data.splitlines()
+    selected = raw_lines[-count:] if count > 0 else raw_lines
+    return [_decode_log_line(l) for l in selected]
 
 
 def read_log_tail(app_id, count):
@@ -2949,17 +3325,6 @@ def start_log_maintenance():
                 LOG.exception("日志维护失败")
             time.sleep(LOG_MAINTENANCE_SEC)
     threading.Thread(target=_maintain, daemon=True).start()
-
-
-def sniff_image(data):
-    """magic bytes 校验 → "png" / "jpg" / "webp" / None。"""
-    if len(data) >= 8 and data[:8] == b"\x89PNG\r\n\x1a\n":
-        return "png"
-    if len(data) >= 3 and data[:3] == b"\xff\xd8\xff":
-        return "jpg"
-    if len(data) >= 12 and data[:4] == b"RIFF" and data[8:12] == b"WEBP":
-        return "webp"
-    return None
 
 
 # ---------------------------------------------------------------- 站点图标抓取
@@ -3008,16 +3373,6 @@ def http_get(url, port, timeout=3, limit=262144):
             return r.read(limit), (r.headers.get("Content-Type") or "")
     except Exception:
         return None, None
-
-
-def sniff_icon_bytes(data, ctype=""):
-    """→ "png" / "jpg" / "webp" / "ico" / None。拒绝主动 SVG 内容。"""
-    if len(data) >= 4 and data[:4] == b"\x00\x00\x01\x00":
-        return "ico"
-    ext = sniff_image(data)
-    if ext:
-        return ext
-    return None
 
 
 def fetch_favicon(port, host="127.0.0.1"):
@@ -3283,6 +3638,20 @@ def validate_app_fields(data, partial):
         fields["openUrl"] = open_url
     elif not partial:
         fields["openUrl"] = None
+    if "iconType" in data:
+        it = data["iconType"]
+        if it is not None and it not in ("preset", "custom"):
+            return None, "iconType 必须是 preset/custom 或 null"
+        fields["iconType"] = it
+    elif not partial:
+        fields["iconType"] = None
+    if "iconSourcePath" in data:
+        isp = data["iconSourcePath"]
+        if isp is not None and not isinstance(isp, str):
+            return None, "iconSourcePath 必须是字符串或 null"
+        fields["iconSourcePath"] = (isp or None)
+    elif not partial:
+        fields["iconSourcePath"] = None
     if fields.get("kind") == "task":
         fields["port"] = None  # 批处理任务无端口语义
         fields["openUrl"] = None
@@ -3375,8 +3744,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def log_message(self, fmt, *args):
         try:
-            if self.path.startswith("/api/state"):
-                return  # 2s 轮询不刷日志
+            if self.path.startswith("/api/state") or self.path.startswith("/api/console/log"):
+                return  # 轮询不刷日志，避免自刷新淹没业务日志
         except Exception:
             pass
         sys.stderr.write("%s - %s\n" % (self.client_address[0], fmt % args))
@@ -3504,8 +3873,9 @@ class Handler(BaseHTTPRequestHandler):
             return self._deny_request(415, "接口仅接受 application/json")
         if content_kind == "image" and media_type not in (
                 "image/png", "image/jpeg", "image/webp",
+                "image/x-icon", "image/vnd.microsoft.icon", "image/ico", "image/icon",
                 "application/octet-stream"):
-            return self._deny_request(415, "图标接口仅接受 PNG/JPEG/WebP 原始数据")
+            return self._deny_request(415, "图标接口仅接受 ICO/PNG/JPEG/WebP 原始数据")
         if content_kind:
             lengths = self.headers.get_all("Content-Length") or []
             if len(lengths) != 1:
@@ -3520,11 +3890,15 @@ class Handler(BaseHTTPRequestHandler):
         return True
 
     def _send(self, body, status=200, ctype="text/plain; charset=utf-8",
-              set_cookie=True):
+              set_cookie=True, close_connection=False):
+        if close_connection:
+            self.close_connection = True
         self.send_response(status)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
+        if self.close_connection:
+            self.send_header("Connection", "close")
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("X-Frame-Options", "DENY")
         self.send_header("Referrer-Policy", "no-referrer")
@@ -3533,7 +3907,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header(
             "Content-Security-Policy",
             "default-src 'self'; base-uri 'none'; frame-ancestors 'none'; "
-            "form-action 'self'; connect-src 'self'; img-src 'self' data: blob:; "
+            "form-action 'self'; connect-src 'self' data:; img-src 'self' data: blob:; "
             "font-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'")
         if set_cookie and self._request_host_allowed():
             self.send_header(
@@ -3541,15 +3915,17 @@ class Handler(BaseHTTPRequestHandler):
                 "console_session=%s; Path=/; HttpOnly; SameSite=Strict" %
                 self.server.control_token)
         self.end_headers()
-        if body:
-            try:
+        try:
+            if body:
                 self.wfile.write(body)
-            except (BrokenPipeError, ConnectionResetError):
-                pass
+            self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass
 
-    def send_json(self, obj, status=200):
+    def send_json(self, obj, status=200, close_connection=False):
         self._send(json.dumps(obj, ensure_ascii=False).encode("utf-8"),
-                   status, "application/json; charset=utf-8")
+                   status, "application/json; charset=utf-8",
+                   close_connection=close_connection)
 
     def send_err(self, status, msg):
         self.send_json({"ok": False, "error": msg}, status)
@@ -3634,25 +4010,35 @@ class Handler(BaseHTTPRequestHandler):
 
     def serve_static(self, path):
         rel = urllib.parse.unquote(path).lstrip("/") or "index.html"
-        full = os.path.normpath(os.path.join(STATIC_DIR, rel))
-        # realpath 解析后必须仍在 STATIC_DIR 内，防路径穿越与符号链接逃逸。
-        try:
-            inside = os.path.commonpath(
-                [os.path.realpath(STATIC_DIR), os.path.realpath(full)]
-            ) == os.path.realpath(STATIC_DIR)
-        except (ValueError, OSError):
-            inside = False
-        if not inside or not os.path.isfile(full):
+        search_dirs = []
+        if os.path.isdir(FRONTEND_DIST_DIR):
+            search_dirs.append(FRONTEND_DIST_DIR)
+        search_dirs.append(STATIC_DIR)
+
+        found_file = None
+        for base in search_dirs:
+            full = os.path.normpath(os.path.join(base, rel))
+            try:
+                inside = os.path.commonpath(
+                    [os.path.realpath(base), os.path.realpath(full)]
+                ) == os.path.realpath(base)
+            except (ValueError, OSError):
+                inside = False
+            if inside and os.path.isfile(full):
+                found_file = full
+                break
+
+        if not found_file:
             if rel == "index.html":
                 self._send(PLACEHOLDER_HTML.encode("utf-8"), 200,
                            "text/html; charset=utf-8")
             else:
                 self._send(b"404 Not Found", 404, set_cookie=False)
             return
-        ctype = STATIC_TYPES.get(os.path.splitext(full)[1].lower(),
+        ctype = STATIC_TYPES.get(os.path.splitext(found_file)[1].lower(),
                                  "application/octet-stream")
         try:
-            with open(full, "rb") as f:
+            with open(found_file, "rb") as f:
                 data = f.read()
         except OSError:
             self._send(b"404 Not Found", 404, set_cookie=False)
@@ -3785,7 +4171,8 @@ class Handler(BaseHTTPRequestHandler):
         if what not in ("dir", "script"):
             self.send_err(400, "what 必须是 dir/script")
             return
-        path, canceled = pick_path(what)
+        initial_dir = str(data.get("initialDir") or "")
+        path, canceled = pick_path(what, initial_dir)
         if canceled:  # 用户取消不是错误，前端静默
             self.send_json({"ok": True, "canceled": True})
         elif not path:
@@ -3835,7 +4222,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json({"ok": True, "pid": SELF_PID,
                                 "helperPid": helper_pid,
                                 "port": self.server.console_port,
-                                "alreadyScheduled": True})
+                                "alreadyScheduled": True},
+                               close_connection=True)
             else:
                 self.send_err(409, "总控台正在停止，无法重复重启")
             return
@@ -3850,7 +4238,8 @@ class Handler(BaseHTTPRequestHandler):
         invalidate_state_cache()
         self.send_json({"ok": True, "pid": SELF_PID,
                         "helperPid": helper_pid,
-                        "port": self.server.console_port})
+                        "port": self.server.console_port},
+                       close_connection=True)
 
     def handle_console_stop(self):
         reserved, current, _ = self.server.reserve_console_action("stop")
@@ -3858,14 +4247,16 @@ class Handler(BaseHTTPRequestHandler):
             if current == "stop":
                 self.send_json({"ok": True, "pid": SELF_PID,
                                 "port": self.server.console_port,
-                                "alreadyScheduled": True})
+                                "alreadyScheduled": True},
+                               close_connection=True)
             else:
                 self.send_err(409, "总控台正在重启，无法同时停止")
             return
         schedule_console_stop(self.server)
         invalidate_state_cache()
         self.send_json({"ok": True, "pid": SELF_PID,
-                        "port": self.server.console_port})
+                        "port": self.server.console_port},
+                       close_connection=True)
 
     def handle_kill(self):
         data, err = self.read_json_body()
@@ -3958,7 +4349,10 @@ class Handler(BaseHTTPRequestHandler):
                "port": fields["port"], "openUrl": fields.get("openUrl"),
                "emoji": fields["emoji"],
                "glyph": fields["glyph"], "kind": fields["kind"],
-               "icon": None, "favicon": None, "lastPid": None,
+               "icon": None, "favicon": None,
+               "iconType": fields.get("iconType"),
+               "iconSourcePath": fields.get("iconSourcePath"),
+               "lastPid": None,
                "lastPgid": None, "runToken": None,
                "attached": False, "lastExit": None,
                "createdAt": int(time.time())}
@@ -4222,9 +4616,10 @@ class Handler(BaseHTTPRequestHandler):
             self.send_err(400, "图标大小不能超过 5MB")
             return
         raw = self.rfile.read(length)
-        kind = sniff_image(raw)
+        ctype = self.headers.get("Content-Type") or ""
+        kind = sniff_icon_bytes(raw, ctype)
         if kind is None:
-            self.send_err(400, "仅支持 PNG / JPEG / WebP 图片")
+            self.send_err(400, "仅支持 ICO / PNG / JPEG / WebP 图片")
             return
         _ensure_private_dir(ICONS_DIR)
         for ext in ICON_EXTS:
@@ -4559,13 +4954,22 @@ def launcher_main():
 
 def schedule_console_restart(server, preferred_port):
     """启动独立 helper，响应发出后关闭当前 HTTP 服务。"""
-    helper = subprocess.Popen(
-        [sys.executable, os.path.abspath(__file__), "--restart-helper",
-         str(SELF_PID), str(int(preferred_port))],
-        cwd=BASE_DIR, start_new_session=True, close_fds=True)
+    cmd = [sys.executable]
+    if IS_WIN:
+        cmd += ["-X", "utf8"]
+    cmd += [os.path.abspath(__file__), "--restart-helper",
+            str(SELF_PID), str(int(preferred_port))]
+
+    if IS_WIN:
+        flags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        helper = subprocess.Popen(
+            cmd, cwd=BASE_DIR, creationflags=flags)
+    else:
+        helper = subprocess.Popen(
+            cmd, cwd=BASE_DIR, start_new_session=True, close_fds=True)
 
     def _shutdown():
-        time.sleep(0.25)
+        time.sleep(0.8)
         server.shutdown()
     threading.Thread(target=_shutdown, daemon=True).start()
     return helper.pid
@@ -4574,25 +4978,87 @@ def schedule_console_restart(server, preferred_port):
 def schedule_console_stop(server):
     """响应发送完成后关闭 HTTP 服务，不结束启动台里的独立进程组。"""
     def _shutdown():
-        time.sleep(0.25)
+        time.sleep(0.8)
         server.shutdown()
     threading.Thread(target=_shutdown, daemon=True).start()
 
 
 def restart_helper(old_pid, preferred_port):
-    """等旧进程释放端口后，在 helper 原地 exec 新总控台。"""
-    deadline = time.monotonic() + 12.0
+    """等旧进程释放端口后，在 helper 原地 exec 或在新进程启动新总控台。"""
+    deadline = time.monotonic() + 15.0
     while time.monotonic() < deadline and pid_alive(old_pid):
         time.sleep(0.1)
     if pid_alive(old_pid):
         return 1
-    args = [sys.executable, os.path.abspath(__file__),
+    time.sleep(0.2)
+
+    cmd = [sys.executable]
+    if IS_WIN:
+        cmd += ["-X", "utf8"]
+    cmd += [os.path.abspath(__file__),
             "--preferred-port", str(int(preferred_port)), "--no-browser"]
-    os.execv(sys.executable, args)
-    return 0
+
+    if IS_WIN:
+        flags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        subprocess.Popen(cmd, cwd=BASE_DIR, creationflags=flags)
+        return 0
+    else:
+        os.execv(sys.executable, cmd)
+        return 0
 
 
-def _run_console(preferred_port=None, open_browser=True):
+def start_frontend_dev_server():
+    """在后台启动前端 Vite 开发服务器，共用当前控制台窗口，退出时自动终止。"""
+    if not os.path.isdir(FRONTEND_DIR):
+        return None
+    pkg_json = os.path.join(FRONTEND_DIR, "package.json")
+    if not os.path.isfile(pkg_json):
+        return None
+    npm_cmd = shutil.which("npm.cmd") if IS_WIN else shutil.which("npm")
+    if not npm_cmd:
+        print("[前端] 未检测到 npm 环境，由 Python 后端直接托管静态资源", flush=True)
+        return None
+
+    node_modules = os.path.join(FRONTEND_DIR, "node_modules")
+    if not os.path.isdir(node_modules):
+        print("[前端] 首次启动，正在安装前端依赖...", flush=True)
+        subprocess.run([npm_cmd, "install"], cwd=FRONTEND_DIR)
+
+    print("[前端] 正在单窗口启动 Vite 开发服务 (http://localhost:5173)...", flush=True)
+    try:
+        proc = subprocess.Popen(
+            [npm_cmd, "run", "dev"],
+            cwd=FRONTEND_DIR,
+            shell=IS_WIN,
+        )
+        return proc
+    except Exception as e:
+        print(f"[前端] 启动 Vite 失败: {e}", flush=True)
+        return None
+
+
+def stop_frontend_dev_server(proc):
+    """安全停止前端开发服务子进程树。"""
+    if proc is None:
+        return
+    try:
+        if IS_WIN:
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        else:
+            proc.terminate()
+            proc.wait(timeout=2)
+    except Exception:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+
+
+def _run_console(preferred_port=None, open_browser=True, dev_mode=False):
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -4607,64 +5073,158 @@ def _run_console(preferred_port=None, open_browser=True):
         candidates.remove(preferred_port)
         candidates.insert(0, preferred_port)
     for p in candidates:
-        try:
-            server = ConsoleServer((HOST, p), Handler, cfg, p)
-            port = p
+        max_attempts = 5 if (preferred_port and p == preferred_port) else 1
+        for attempt in range(max_attempts):
+            try:
+                server = ConsoleServer((HOST, p), Handler, cfg, p)
+                port = p
+                break
+            except OSError:
+                if attempt < max_attempts - 1:
+                    time.sleep(0.2)
+                continue
+        if server is not None:
             break
-        except OSError:
-            continue
     if server is None:
         print("错误：端口 %d-%d 均被占用，无法启动。" %
               (PORT_START, PORT_START + PORT_TRIES - 1))
         sys.exit(1)
 
-    print("总控台已启动: http://%s:%d/  (Ctrl+C 停止)" % (HOST, port), flush=True)
+    frontend_proc = None
+    if dev_mode:
+        frontend_proc = start_frontend_dev_server()
+        if frontend_proc:
+            atexit.register(stop_frontend_dev_server, frontend_proc)
+
+    print("总控台后端已启动: http://%s:%d/  (Ctrl+C 停止)" % (HOST, port), flush=True)
     if open_browser:
-        open_browser_later(port)
+        if frontend_proc:
+            threading.Timer(1.5, lambda: webbrowser.open("http://localhost:5173/")).start()
+        else:
+            open_browser_later(port)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
+        if frontend_proc:
+            stop_frontend_dev_server(frontend_proc)
         server.server_close()
         print("已停止", flush=True)
 
 
-def redirect_console_output():
-    """在运行目录迁移完成后，将 .app 输出安全追加到 Library Logs。"""
-    path = os.path.join(LOGS_DIR, "console.log")
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
-    try:
-        if hasattr(os, "fchmod"):
-            os.fchmod(fd, 0o600)
-        for stream in (sys.stdout, sys.stderr):
+class ConsoleLogTee:
+    """同时向原有终端 stream 与 console.log 追加输出，保证行缓冲与跨平台编码安全。"""
+
+    def __init__(self, original_stream, log_file):
+        self._orig = original_stream
+        self._file = log_file
+        self._lock = threading.RLock()
+
+    def write(self, s):
+        if not s:
+            return 0
+        with self._lock:
+            if self._orig:
+                try:
+                    self._orig.write(s)
+                except (AttributeError, OSError):
+                    pass
+            if self._file:
+                try:
+                    self._file.write(s)
+                    self._file.flush()
+                except (AttributeError, OSError):
+                    pass
+        return len(s)
+
+    def flush(self):
+        with self._lock:
+            if self._orig:
+                try:
+                    self._orig.flush()
+                except (AttributeError, OSError):
+                    pass
+            if self._file:
+                try:
+                    self._file.flush()
+                except (AttributeError, OSError):
+                    pass
+
+    def isatty(self):
+        if self._orig and hasattr(self._orig, "isatty"):
             try:
-                stream.flush()
+                return self._orig.isatty()
+            except Exception:
+                pass
+        return False
+
+    def fileno(self):
+        if self._orig and hasattr(self._orig, "fileno"):
+            try:
+                return self._orig.fileno()
             except (AttributeError, OSError):
                 pass
-        if IS_WIN:
-            # 重定向后 fd 仍是 CRT 文本模式，会与 TextIOWrapper 的
-            # 换行翻译叠加成 \r\r\n；切二进制模式只留一层翻译。
-            import msvcrt
-            msvcrt.setmode(fd, os.O_BINARY)
-            msvcrt.setmode(1, os.O_BINARY)
-            msvcrt.setmode(2, os.O_BINARY)
-        os.dup2(fd, 1)
-        os.dup2(fd, 2)
-    finally:
-        os.close(fd)
-    for stream in (sys.stdout, sys.stderr):
+        if self._file and hasattr(self._file, "fileno"):
+            try:
+                return self._file.fileno()
+            except (AttributeError, OSError):
+                pass
+        raise OSError("fileno not supported")
+
+
+def setup_console_logging(log_to_file_only=False):
+    """确保总控台自身输出实时写入 LOGS_DIR/console.log。
+    若 log_to_file_only 为 True（例如 macOS .app 启动），只写文件；
+    否则同时输出到终端和 console.log（Tee 模式），使前端日志中心始终保持实时更新。
+    """
+    _ensure_private_dir(LOGS_DIR)
+    path = os.path.join(LOGS_DIR, "console.log")
+    rotate_log_file(path)
+
+    if not IS_WIN and log_to_file_only:
         try:
-            stream.reconfigure(line_buffering=True)
-        except (AttributeError, OSError):
-            pass
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+            if hasattr(os, "fchmod"):
+                os.fchmod(fd, 0o600)
+            for stream in (sys.stdout, sys.stderr):
+                try:
+                    stream.flush()
+                except (AttributeError, OSError):
+                    pass
+            os.dup2(fd, 1)
+            os.dup2(fd, 2)
+            os.close(fd)
+            for stream in (sys.stdout, sys.stderr):
+                try:
+                    stream.reconfigure(line_buffering=True)
+                except (AttributeError, OSError):
+                    pass
+            return
+        except Exception as e:
+            LOG.warning("os.dup2 重定向失败，降级为应用层日志包装: %s", e)
+
+    try:
+        log_file = open(path, "a", encoding="utf-8", errors="replace", buffering=1)
+    except OSError as e:
+        LOG.warning("无法打开 console.log 进行记录: %s", e)
+        return
+
+    orig_out = getattr(sys.stdout, "_orig", sys.stdout) if not log_to_file_only else None
+    orig_err = getattr(sys.stderr, "_orig", sys.stderr) if not log_to_file_only else None
+    sys.stdout = ConsoleLogTee(orig_out, log_file)
+    sys.stderr = ConsoleLogTee(orig_err, log_file)
 
 
-def main(preferred_port=None, open_browser=True, log_to_file=False):
+def redirect_console_output():
+    """在运行目录迁移完成后，将输出安全追加到 Library Logs。"""
+    setup_console_logging(log_to_file_only=True)
+
+
+def main(preferred_port=None, open_browser=True, log_to_file=False, dev_mode=False):
     """Run exactly one console for this project/data directory."""
     migration = prepare_runtime_storage()
-    if log_to_file:
-        redirect_console_output()
+    setup_console_logging(log_to_file_only=log_to_file)
     if migration["dataMigrated"]:
         print("已将项目内旧配置和图标复制到: %s" % DATA_DIR,
               flush=True)
@@ -4681,7 +5241,7 @@ def main(preferred_port=None, open_browser=True, log_to_file=False):
                 webbrowser.open("http://%s:%d/" % (HOST, min(ports)))
         return False
     try:
-        _run_console(preferred_port, open_browser)
+        _run_console(preferred_port, open_browser, dev_mode=dev_mode)
         return True
     finally:
         release_instance_lock(instance_lock)
@@ -4709,4 +5269,5 @@ if __name__ == "__main__":
                 preferred = int(sys.argv[index + 1])
             except (ValueError, IndexError):
                 sys.exit(2)
-        main(preferred_port=preferred, open_browser="--no-browser" not in sys.argv)
+        dev_mode = ("--dev" in sys.argv or "--with-frontend" in sys.argv) and ("--no-frontend" not in sys.argv)
+        main(preferred_port=preferred, open_browser="--no-browser" not in sys.argv, dev_mode=dev_mode)

@@ -102,6 +102,14 @@ sideNav.addEventListener('keydown', e => {
 /* ============================================================
    轮询
    ============================================================ */
+function getPollIntervalMs() {
+  const stored = localStorage.getItem('console-poll-interval');
+  if (stored) {
+    const parsed = parseInt(stored, 10);
+    if (!isNaN(parsed) && parsed > 0) return parsed * 1000;
+  }
+  return 2000;
+}
 const POLL_INTERVAL_MS = 2000;
 const POLL_TIMEOUT_MS = 7000;
 let pollPromise = null;
@@ -177,7 +185,7 @@ function poll(force = false) {
   return pollPromise;
 }
 
-function schedulePoll(delay = POLL_INTERVAL_MS) {
+function schedulePoll(delay = getPollIntervalMs()) {
   clearTimeout(pollTimer);
   pollTimer = null;
   if (document.hidden) return;
