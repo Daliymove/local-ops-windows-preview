@@ -7,9 +7,10 @@ import { api } from '../../services/api';
 interface CmdkModalProps {
   data: StateResponse | null;
   onViewChange: (view: 'launchpad' | 'services') => void;
+  onRefresh?: () => void;
 }
 
-export const CmdkModal: React.FC<CmdkModalProps> = ({ data, onViewChange }) => {
+export const CmdkModal: React.FC<CmdkModalProps> = ({ data, onViewChange, onRefresh }) => {
   const { isCmdkOpen, setCmdkOpen, openAppEdit, openLogDrawer, showToast } = useModal();
   const [query, setQuery] = useState('');
 
@@ -126,6 +127,7 @@ export const CmdkModal: React.FC<CmdkModalProps> = ({ data, onViewChange }) => {
                       await api.startApp(app.id);
                       showToast(`已启动 ${app.name}`);
                     }
+                    onRefresh?.();
                     setCmdkOpen(false);
                   }}
                   className="flex items-center justify-between px-3 py-2 rounded-xl hover:bg-[var(--card-2)] cursor-pointer transition-colors"

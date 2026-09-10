@@ -1,5 +1,5 @@
 import React from 'react';
-import type { ServiceItem } from '../../types/console';
+import type { ServiceItem, StateResponse } from '../../types/console';
 import { Sparkles, Plus, EyeOff, X } from 'lucide-react';
 import { useModal } from '../../context/ModalContext';
 import { api } from '../../services/api';
@@ -8,12 +8,14 @@ interface PortDiscoveryBannerProps {
   newServices: ServiceItem[];
   onDismiss: (key: string) => void;
   onRefresh: () => void;
+  onMutate?: (updater: (prev: StateResponse | null) => StateResponse | null) => void;
 }
 
 export const PortDiscoveryBanner: React.FC<PortDiscoveryBannerProps> = ({
   newServices,
   onDismiss,
   onRefresh,
+  onMutate,
 }) => {
   const { openAppEdit, showToast } = useModal();
 
@@ -32,6 +34,10 @@ export const PortDiscoveryBanner: React.FC<PortDiscoveryBannerProps> = ({
   };
 
   const handleHide = async (svc: ServiceItem) => {
+    onMutate?.(prev => prev ? {
+      ...prev,
+      services: prev.services.map(s => s.key === svc.key ? { ...s, hidden: true } : s),
+    } : prev);
     await api.setServiceFlag(svc.key, 'hidden', true);
     showToast(`已隐藏端口 :${svc.port}`);
     onDismiss(svc.key);

@@ -692,7 +692,7 @@ def _win_quote(value):
 
 
 def _parse_win_process_table_json(text):
-    """CIM ConvertTo-Json 文本 → {pid: {ppid, args, name, exe, created, ws}}。"""
+    """CIM ConvertTo-Json 文本 → {pid: {ppid, args, name, exe, created, ws, kernel_time, user_time}}。"""
     if not text or not text.strip():
         return {}
     try:
@@ -718,21 +718,25 @@ def _parse_win_process_table_json(text):
             "args": item.get("CommandLine") or "",
             "created": item.get("CreationDate") or "",
             "ws": item.get("WorkingSetSize"),
+            "kernel_time": item.get("KernelModeTime"),
+            "user_time": item.get("UserModeTime"),
         }
     return table
 
 
 def _win_process_table():
-    """一次性 CIM 快照 → {pid: {ppid, args, name, exe, created, ws}}。"""
+    """一次性 CIM 快照 → {pid: {ppid, args, name, exe, created, ws, kernel_time, user_time}}。"""
     script = (
         "Get-CimInstance Win32_Process | "
         "Select-Object ProcessId,ParentProcessId,Name,ExecutablePath,"
-        "CommandLine,CreationDate,WorkingSetSize | ConvertTo-Json -Compress")
+        "CommandLine,CreationDate,WorkingSetSize,KernelModeTime,UserModeTime | "
+        "ConvertTo-Json -Compress")
     return _parse_win_process_table_json(
         _win_powershell(script, timeout=SUBPROCESS_TIMEOUT * 2))
 
 
 _WIN_TOTAL_MEM_CACHE = {"mono": 0.0, "kb": 0.0}
+_WIN_CPU_SAMPLES = {}  # {pid: (mono_time, total_cpu_100ns, created_str)}
 
 
 def _win_total_memory_kb():
@@ -755,11 +759,14 @@ _WIN_EPOCH = 116444736000000000  # 1601-01-01 → 1970-01-01（100ns 单位）
 
 
 def _win_parse_creation(created):
-    """CIM CreationDate (ISO 或 WMI DMTF 格式) → 创建时间戳秒；失败返回 None。"""
+    """CIM CreationDate (ISO, WMI DMTF 或 /Date(...) 格式) → 创建时间戳秒；失败返回 None。"""
     if not created:
         return None
     text = str(created)
     try:
+        m_date = re.search(r"/Date\((\d+)(?:[+-]\d+)?\)/", text)
+        if m_date:
+            return int(m_date.group(1)) / 1000.0
         if text.endswith("+000") or "T" in text:
             from datetime import datetime
             parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
@@ -1071,13 +1078,15 @@ def ps_snapshot(pids=None, with_uid=True):
 def _ps_snapshot_windows(pids=None):
     """CIM 快照 → 与 ps_snapshot 相同结构。
 
-    Windows 无 CPU% 瞬时值（需两次采样），v1 置 0；mem 用 WorkingSet 占比。
+    Windows CPU%：通过 KernelModeTime + UserModeTime（100ns）两趟差值采样；
+    初次采样时按生命周期均值估算。mem 用 WorkingSet 占比。
     uid 统一为 0（本机单用户语义，与其他用户进程的隔离交给 taskkill 权限）。
     """
     table = _win_process_table()
     if not table:
         return {}
     total_kb = _win_total_memory_kb()
+    now = time.monotonic()
     result = {}
     for pid, info in table.items():
         if pids is not None and pid not in pids:
@@ -1088,14 +1097,47 @@ def _ps_snapshot_windows(pids=None):
         except (TypeError, ValueError):
             ws_bytes = 0.0
         mem = (ws_bytes / 1024.0 / total_kb * 100.0) if total_kb else 0.0
+
+        k_time = info.get("kernel_time") or 0
+        u_time = info.get("user_time") or 0
+        try:
+            total_cpu_100ns = int(k_time) + int(u_time)
+        except (TypeError, ValueError):
+            total_cpu_100ns = 0
+
+        created_raw = info.get("created")
+        etime = _win_etime(created_raw)
+        cpu_val = 0.0
+
+        if total_cpu_100ns > 0:
+            if pid in _WIN_CPU_SAMPLES:
+                prev_time, prev_cpu, prev_created = _WIN_CPU_SAMPLES[pid]
+                if prev_created == created_raw:
+                    dt = now - prev_time
+                    dcpu_100ns = total_cpu_100ns - prev_cpu
+                    if dt > 0.1 and dcpu_100ns >= 0:
+                        dcpu_sec = dcpu_100ns / 10000000.0
+                        cpu_val = max(0.0, round((dcpu_sec / dt) * 100.0, 1))
+            if cpu_val == 0.0 and etime > 0:
+                dcpu_sec = total_cpu_100ns / 10000000.0
+                cpu_val = max(0.0, round((dcpu_sec / etime) * 100.0, 1))
+            _WIN_CPU_SAMPLES[pid] = (now, total_cpu_100ns, created_raw)
+
         result[pid] = {
             "uid": 0,
             "comm": info.get("exe") or info.get("name") or "",
             "args": info.get("args") or "",
-            "cpu": 0.0,
+            "cpu": cpu_val,
             "mem": round(mem, 2),
-            "etime": _win_etime(info.get("created")),
+            "etime": etime,
         }
+
+    if len(_WIN_CPU_SAMPLES) > len(table) * 2:
+        alive_pids = set(table.keys())
+        for old_pid in list(_WIN_CPU_SAMPLES.keys()):
+            if old_pid not in alive_pids:
+                _WIN_CPU_SAMPLES.pop(old_pid, None)
+
     return result
 
 
@@ -1293,6 +1335,38 @@ def origin_snapshot():
     return table
 
 
+def _match_origin_agent(parent_args):
+    """从父进程命令行中精准匹配已知 AI 助手，避免把工作区目录名误当成启动者。"""
+    if not parent_args:
+        return None
+    # 拆分前几个 token（可执行文件路径与直接参数）
+    parts = parent_args.split()[:5]
+    bases = []
+    for p in parts:
+        clean = p.strip("\"'").strip()
+        if not clean or clean.startswith("-"):
+            continue
+        base = os.path.basename(clean).casefold()
+        for ext in (".exe", ".cmd", ".bat", ".ps1", ".sh", ".js", ".mjs", ".py"):
+            if base.endswith(ext):
+                base = base[:-len(ext)]
+                break
+        bases.append(base)
+
+    for base in bases:
+        for pattern, label in _ORIGIN_AGENT_PATTERNS:
+            if pattern.search(base):
+                return {"label": label, "icon": "bot"}
+
+    hay = parent_args.casefold()
+    for pattern, label in _ORIGIN_AGENT_PATTERNS:
+        pat_str = pattern.pattern
+        if "cursor-agent" in pat_str or "claude-code" in pat_str:
+            if pattern.search(hay):
+                return {"label": label, "icon": "bot"}
+    return None
+
+
 def attribute_origin(pid, table):
     """沿 PPID 链识别来源应用，返回 {"label", "icon"} 或 None。
 
@@ -1302,24 +1376,31 @@ def attribute_origin(pid, table):
     总控台 / launchd 是更优答案，都没有时才以最近的未识别进程命名。
     最多上爬 12 层，遇到环或缺失即终止。
     """
-    cur, seen, candidate = pid, set(), None
+    cur, seen = pid, set()
+    chain = []
+    # 阶段 1：向上爬取整条祖先链（至多 12 层），且优先全链检测是否存在总控台守护标记
     for _ in range(12):
         entry = table.get(cur)
         if not entry:
             break
         ppid, _ = entry
-        if ppid in seen:
+        if ppid in seen or ppid <= 0:
             break
         seen.add(ppid)
         parent_args = (table.get(ppid) or (0, ""))[1] or ""
-        if ppid <= 1:
-            return candidate or {"label": "系统", "icon": "server"}
+        chain.append((ppid, parent_args))
         if RUN_TOKEN_ARG_PREFIX in parent_args:
             return {"label": "总控台", "icon": "rocket"}
-        hay = parent_args.casefold()
-        for pattern, label in _ORIGIN_AGENT_PATTERNS:
-            if pattern.search(hay):
-                return {"label": label, "icon": "bot"}
+        cur = ppid
+
+    # 阶段 2：在确认整条祖先链没有总控台标记后，从最近父进程向上匹配来源
+    candidate = None
+    for ppid, parent_args in chain:
+        if ppid <= 1:
+            return candidate or {"label": "系统", "icon": "server"}
+        agent = _match_origin_agent(parent_args)
+        if agent:
+            return agent
         bundle = _ORIGIN_BUNDLE_RE.search(parent_args)
         if bundle:
             app_name = bundle.group(1)
@@ -1332,7 +1413,7 @@ def attribute_origin(pid, table):
             return {"label": _ORIGIN_MULTIPLEXERS[base], "icon": "terminal"}
         if base and base not in _ORIGIN_SKIP_NAMES and candidate is None:
             candidate = {"label": base, "icon": "package"}
-        cur = ppid
+
     return candidate
 
 
@@ -1367,6 +1448,9 @@ def build_services(cfg, groups=None):
         key = "%s:%d" % (name, port)
         cwd = cwds.get(pid)
         app = app_by_pid.get(pid)
+        origin = attribute_origin(pid, origin_table)
+        if app and not app.get("attached") and (not origin or origin.get("label") != "总控台"):
+            origin = {"label": "总控台", "icon": "rocket"}
         services.append({
             "key": key,
             # key 保持 name:port 以兼容既有隐藏/置顶配置；instanceKey 用于
@@ -1382,8 +1466,59 @@ def build_services(cfg, groups=None):
             "appId": app["id"] if app else None,
             "appName": app["name"] if app else None,
             # 来源溯源（尽力判断）：哪个应用/AI 助手启动了这个进程
-            "origin": attribute_origin(pid, origin_table),
+            "origin": origin,
         })
+
+    def _is_system_service(s):
+        origin = s.get("origin") or {}
+        origin_label = origin.get("label") or ""
+        if origin_label in ("系统", "System"):
+            return True
+        if s.get("group") == "background":
+            return True
+        name = (s.get("name") or "").lower()
+        if name in ("system", "spoolsv.exe", "lsass.exe", "wininit.exe",
+                    "csrss.exe", "services.exe", "smss.exe", "launchd", "kernel_task"):
+            return True
+        if name.startswith("svchost"):
+            return True
+        cmd = (s.get("cmd") or "").lower()
+        cwd = (s.get("cwd") or "").lower()
+        if "\\windows\\system32\\" in cmd or "\\windows\\syswow64\\" in cmd:
+            return True
+        if "\\windows\\system32\\" in cwd:
+            return True
+        if cmd.startswith(("/system/", "/usr/libexec/", "/usr/sbin/", "/sbin/")):
+            return True
+        return False
+
+    def _is_console_service(s):
+        origin = s.get("origin") or {}
+        return bool(s.get("appId") or origin.get("label") == "总控台")
+
+    def _service_sort_key(s):
+        pinned = bool(s.get("pinned"))
+        is_console = _is_console_service(s)
+        is_system = _is_system_service(s)
+
+        if pinned:
+            tier = 0
+            sub_tier = 0 if is_console else (2 if is_system else 1)
+        elif is_console:
+            tier = 1
+            sub_tier = 0
+        elif not is_system:
+            tier = 2
+            sub_tier = 0
+        else:
+            tier = 3
+            sub_tier = 0
+
+        port = s.get("port") if s.get("port") is not None else 999999
+        name = s.get("name") or ""
+        return (tier, sub_tier, port, name)
+
+    services.sort(key=_service_sort_key)
     return services, listeners
 
 
@@ -3609,8 +3744,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def log_message(self, fmt, *args):
         try:
-            if self.path.startswith("/api/state"):
-                return  # 2s 轮询不刷日志
+            if self.path.startswith("/api/state") or self.path.startswith("/api/console/log"):
+                return  # 轮询不刷日志，避免自刷新淹没业务日志
         except Exception:
             pass
         sys.stderr.write("%s - %s\n" % (self.client_address[0], fmt % args))
@@ -3755,11 +3890,15 @@ class Handler(BaseHTTPRequestHandler):
         return True
 
     def _send(self, body, status=200, ctype="text/plain; charset=utf-8",
-              set_cookie=True):
+              set_cookie=True, close_connection=False):
+        if close_connection:
+            self.close_connection = True
         self.send_response(status)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
+        if self.close_connection:
+            self.send_header("Connection", "close")
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("X-Frame-Options", "DENY")
         self.send_header("Referrer-Policy", "no-referrer")
@@ -3776,15 +3915,17 @@ class Handler(BaseHTTPRequestHandler):
                 "console_session=%s; Path=/; HttpOnly; SameSite=Strict" %
                 self.server.control_token)
         self.end_headers()
-        if body:
-            try:
+        try:
+            if body:
                 self.wfile.write(body)
-            except (BrokenPipeError, ConnectionResetError):
-                pass
+            self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass
 
-    def send_json(self, obj, status=200):
+    def send_json(self, obj, status=200, close_connection=False):
         self._send(json.dumps(obj, ensure_ascii=False).encode("utf-8"),
-                   status, "application/json; charset=utf-8")
+                   status, "application/json; charset=utf-8",
+                   close_connection=close_connection)
 
     def send_err(self, status, msg):
         self.send_json({"ok": False, "error": msg}, status)
@@ -4081,7 +4222,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json({"ok": True, "pid": SELF_PID,
                                 "helperPid": helper_pid,
                                 "port": self.server.console_port,
-                                "alreadyScheduled": True})
+                                "alreadyScheduled": True},
+                               close_connection=True)
             else:
                 self.send_err(409, "总控台正在停止，无法重复重启")
             return
@@ -4096,7 +4238,8 @@ class Handler(BaseHTTPRequestHandler):
         invalidate_state_cache()
         self.send_json({"ok": True, "pid": SELF_PID,
                         "helperPid": helper_pid,
-                        "port": self.server.console_port})
+                        "port": self.server.console_port},
+                       close_connection=True)
 
     def handle_console_stop(self):
         reserved, current, _ = self.server.reserve_console_action("stop")
@@ -4104,14 +4247,16 @@ class Handler(BaseHTTPRequestHandler):
             if current == "stop":
                 self.send_json({"ok": True, "pid": SELF_PID,
                                 "port": self.server.console_port,
-                                "alreadyScheduled": True})
+                                "alreadyScheduled": True},
+                               close_connection=True)
             else:
                 self.send_err(409, "总控台正在重启，无法同时停止")
             return
         schedule_console_stop(self.server)
         invalidate_state_cache()
         self.send_json({"ok": True, "pid": SELF_PID,
-                        "port": self.server.console_port})
+                        "port": self.server.console_port},
+                       close_connection=True)
 
     def handle_kill(self):
         data, err = self.read_json_body()
@@ -4809,13 +4954,22 @@ def launcher_main():
 
 def schedule_console_restart(server, preferred_port):
     """启动独立 helper，响应发出后关闭当前 HTTP 服务。"""
-    helper = subprocess.Popen(
-        [sys.executable, os.path.abspath(__file__), "--restart-helper",
-         str(SELF_PID), str(int(preferred_port))],
-        cwd=BASE_DIR, start_new_session=True, close_fds=True)
+    cmd = [sys.executable]
+    if IS_WIN:
+        cmd += ["-X", "utf8"]
+    cmd += [os.path.abspath(__file__), "--restart-helper",
+            str(SELF_PID), str(int(preferred_port))]
+
+    if IS_WIN:
+        flags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        helper = subprocess.Popen(
+            cmd, cwd=BASE_DIR, creationflags=flags)
+    else:
+        helper = subprocess.Popen(
+            cmd, cwd=BASE_DIR, start_new_session=True, close_fds=True)
 
     def _shutdown():
-        time.sleep(0.25)
+        time.sleep(0.8)
         server.shutdown()
     threading.Thread(target=_shutdown, daemon=True).start()
     return helper.pid
@@ -4824,22 +4978,33 @@ def schedule_console_restart(server, preferred_port):
 def schedule_console_stop(server):
     """响应发送完成后关闭 HTTP 服务，不结束启动台里的独立进程组。"""
     def _shutdown():
-        time.sleep(0.25)
+        time.sleep(0.8)
         server.shutdown()
     threading.Thread(target=_shutdown, daemon=True).start()
 
 
 def restart_helper(old_pid, preferred_port):
-    """等旧进程释放端口后，在 helper 原地 exec 新总控台。"""
-    deadline = time.monotonic() + 12.0
+    """等旧进程释放端口后，在 helper 原地 exec 或在新进程启动新总控台。"""
+    deadline = time.monotonic() + 15.0
     while time.monotonic() < deadline and pid_alive(old_pid):
         time.sleep(0.1)
     if pid_alive(old_pid):
         return 1
-    args = [sys.executable, os.path.abspath(__file__),
+    time.sleep(0.2)
+
+    cmd = [sys.executable]
+    if IS_WIN:
+        cmd += ["-X", "utf8"]
+    cmd += [os.path.abspath(__file__),
             "--preferred-port", str(int(preferred_port)), "--no-browser"]
-    os.execv(sys.executable, args)
-    return 0
+
+    if IS_WIN:
+        flags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        subprocess.Popen(cmd, cwd=BASE_DIR, creationflags=flags)
+        return 0
+    else:
+        os.execv(sys.executable, cmd)
+        return 0
 
 
 def start_frontend_dev_server():
@@ -4908,12 +5073,18 @@ def _run_console(preferred_port=None, open_browser=True, dev_mode=False):
         candidates.remove(preferred_port)
         candidates.insert(0, preferred_port)
     for p in candidates:
-        try:
-            server = ConsoleServer((HOST, p), Handler, cfg, p)
-            port = p
+        max_attempts = 5 if (preferred_port and p == preferred_port) else 1
+        for attempt in range(max_attempts):
+            try:
+                server = ConsoleServer((HOST, p), Handler, cfg, p)
+                port = p
+                break
+            except OSError:
+                if attempt < max_attempts - 1:
+                    time.sleep(0.2)
+                continue
+        if server is not None:
             break
-        except OSError:
-            continue
     if server is None:
         print("错误：端口 %d-%d 均被占用，无法启动。" %
               (PORT_START, PORT_START + PORT_TRIES - 1))
@@ -4942,41 +5113,118 @@ def _run_console(preferred_port=None, open_browser=True, dev_mode=False):
         print("已停止", flush=True)
 
 
-def redirect_console_output():
-    """在运行目录迁移完成后，将 .app 输出安全追加到 Library Logs。"""
-    path = os.path.join(LOGS_DIR, "console.log")
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
-    try:
-        if hasattr(os, "fchmod"):
-            os.fchmod(fd, 0o600)
-        for stream in (sys.stdout, sys.stderr):
+class ConsoleLogTee:
+    """同时向原有终端 stream 与 console.log 追加输出，保证行缓冲与跨平台编码安全。"""
+
+    def __init__(self, original_stream, log_file):
+        self._orig = original_stream
+        self._file = log_file
+        self._lock = threading.RLock()
+
+    def write(self, s):
+        if not s:
+            return 0
+        with self._lock:
+            if self._orig:
+                try:
+                    self._orig.write(s)
+                except (AttributeError, OSError):
+                    pass
+            if self._file:
+                try:
+                    self._file.write(s)
+                    self._file.flush()
+                except (AttributeError, OSError):
+                    pass
+        return len(s)
+
+    def flush(self):
+        with self._lock:
+            if self._orig:
+                try:
+                    self._orig.flush()
+                except (AttributeError, OSError):
+                    pass
+            if self._file:
+                try:
+                    self._file.flush()
+                except (AttributeError, OSError):
+                    pass
+
+    def isatty(self):
+        if self._orig and hasattr(self._orig, "isatty"):
             try:
-                stream.flush()
+                return self._orig.isatty()
+            except Exception:
+                pass
+        return False
+
+    def fileno(self):
+        if self._orig and hasattr(self._orig, "fileno"):
+            try:
+                return self._orig.fileno()
             except (AttributeError, OSError):
                 pass
-        if IS_WIN:
-            # 重定向后 fd 仍是 CRT 文本模式，会与 TextIOWrapper 的
-            # 换行翻译叠加成 \r\r\n；切二进制模式只留一层翻译。
-            import msvcrt
-            msvcrt.setmode(fd, os.O_BINARY)
-            msvcrt.setmode(1, os.O_BINARY)
-            msvcrt.setmode(2, os.O_BINARY)
-        os.dup2(fd, 1)
-        os.dup2(fd, 2)
-    finally:
-        os.close(fd)
-    for stream in (sys.stdout, sys.stderr):
+        if self._file and hasattr(self._file, "fileno"):
+            try:
+                return self._file.fileno()
+            except (AttributeError, OSError):
+                pass
+        raise OSError("fileno not supported")
+
+
+def setup_console_logging(log_to_file_only=False):
+    """确保总控台自身输出实时写入 LOGS_DIR/console.log。
+    若 log_to_file_only 为 True（例如 macOS .app 启动），只写文件；
+    否则同时输出到终端和 console.log（Tee 模式），使前端日志中心始终保持实时更新。
+    """
+    _ensure_private_dir(LOGS_DIR)
+    path = os.path.join(LOGS_DIR, "console.log")
+    rotate_log_file(path)
+
+    if not IS_WIN and log_to_file_only:
         try:
-            stream.reconfigure(line_buffering=True)
-        except (AttributeError, OSError):
-            pass
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+            if hasattr(os, "fchmod"):
+                os.fchmod(fd, 0o600)
+            for stream in (sys.stdout, sys.stderr):
+                try:
+                    stream.flush()
+                except (AttributeError, OSError):
+                    pass
+            os.dup2(fd, 1)
+            os.dup2(fd, 2)
+            os.close(fd)
+            for stream in (sys.stdout, sys.stderr):
+                try:
+                    stream.reconfigure(line_buffering=True)
+                except (AttributeError, OSError):
+                    pass
+            return
+        except Exception as e:
+            LOG.warning("os.dup2 重定向失败，降级为应用层日志包装: %s", e)
+
+    try:
+        log_file = open(path, "a", encoding="utf-8", errors="replace", buffering=1)
+    except OSError as e:
+        LOG.warning("无法打开 console.log 进行记录: %s", e)
+        return
+
+    orig_out = getattr(sys.stdout, "_orig", sys.stdout) if not log_to_file_only else None
+    orig_err = getattr(sys.stderr, "_orig", sys.stderr) if not log_to_file_only else None
+    sys.stdout = ConsoleLogTee(orig_out, log_file)
+    sys.stderr = ConsoleLogTee(orig_err, log_file)
+
+
+def redirect_console_output():
+    """在运行目录迁移完成后，将输出安全追加到 Library Logs。"""
+    setup_console_logging(log_to_file_only=True)
 
 
 def main(preferred_port=None, open_browser=True, log_to_file=False, dev_mode=False):
     """Run exactly one console for this project/data directory."""
     migration = prepare_runtime_storage()
-    if log_to_file:
-        redirect_console_output()
+    setup_console_logging(log_to_file_only=log_to_file)
     if migration["dataMigrated"]:
         print("已将项目内旧配置和图标复制到: %s" % DATA_DIR,
               flush=True)

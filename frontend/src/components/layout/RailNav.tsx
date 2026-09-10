@@ -7,6 +7,7 @@ interface RailNavProps {
   currentView: 'launchpad' | 'services';
   onViewChange: (view: 'launchpad' | 'services') => void;
   connected: boolean;
+  isRestarting?: boolean;
   data: StateResponse | null;
 }
 
@@ -14,6 +15,7 @@ export const RailNav: React.FC<RailNavProps> = ({
   currentView,
   onViewChange,
   connected,
+  isRestarting,
   data,
 }) => {
   const { openLogDrawer, setSettingsOpen } = useModal();
@@ -88,11 +90,15 @@ export const RailNav: React.FC<RailNavProps> = ({
         <div className="flex items-center gap-1.5">
           <span
             className={`inline-block w-2 h-2 rounded-full ${
-              connected ? 'bg-emerald-500 animate-pulse' : 'bg-red-500'
+              isRestarting
+                ? 'bg-[var(--accent)] animate-ping'
+                : connected
+                ? 'bg-emerald-500 animate-pulse'
+                : 'bg-red-500'
             }`}
           />
           <span className="text-[11px] font-medium" style={{ color: 'var(--ink-3)' }}>
-            {connected ? '已连接' : '已断开'}
+            {isRestarting ? '重启中' : connected ? '已连接' : '已断开'}
           </span>
         </div>
         <span className="text-[10px] mono" style={{ color: 'var(--ink-4)' }}>

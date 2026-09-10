@@ -31,6 +31,7 @@ async function request<T = unknown>(
   const opt: RequestInit = {
     method,
     signal: controller.signal,
+    cache: 'no-store',
   };
 
   if (isRawBody) {
@@ -107,12 +108,15 @@ export const api = {
   put: <T = unknown>(path: string, body?: unknown) => request<T>('PUT', path, body),
   del: <T = unknown>(path: string) => request<T>('DELETE', path),
 
-  fetchState: async (): Promise<StateResponse | null> => {
+  fetchState: async (signal?: AbortSignal): Promise<StateResponse | null> => {
     try {
-      const res = await fetch('/api/state', { cache: 'no-store' });
+      const res = await fetch('/api/state', { cache: 'no-store', signal });
       if (!res.ok) return null;
       return await res.json();
-    } catch {
+    } catch (err: unknown) {
+      if (signal?.aborted || (err instanceof Error && (err.name === 'AbortError' || err.name === 'CanceledError'))) {
+        throw err;
+      }
       return null;
     }
   },
@@ -142,7 +146,7 @@ export const api = {
   },
   deleteIcon: (id: string) => api.del(`/api/apps/${id}/icon`),
   getLogs: async (id: string, tail: number = 300): Promise<string> => {
-    const res = await api.get<{ text: string }>(`/api/apps/${id}/logs?tail=${tail}`);
+    const res = await api.get<{ text: string }>(`/api/apps/${id}/logs?tail=${tail}&_t=${Date.now()}`);
     return (res as unknown as { text?: string }).text || '';
   },
 
@@ -158,7 +162,7 @@ export const api = {
   restartConsole: () => api.post('/api/console/restart', {}),
   stopConsole: () => api.post('/api/console/stop', {}),
   getConsoleLogs: async (tail: number = 300): Promise<string> => {
-    const res = await api.get<{ text: string }>(`/api/console/log?tail=${tail}`);
+    const res = await api.get<{ text: string }>(`/api/console/log?tail=${tail}&_t=${Date.now()}`);
     return (res as unknown as { text?: string }).text || '';
   },
   setUiTheme: (theme: string) => api.post('/api/ui/theme', { theme }),

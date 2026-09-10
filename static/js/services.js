@@ -148,9 +148,70 @@ async function setServiceFlag(key, flag, value) {
   return result;
 }
 
-/* pinned 在前，其余按端口升序 */
+function isSystemService(s) {
+  if (!s) return false;
+  const originLabel = s.origin && s.origin.label;
+  if (originLabel === '系统' || originLabel === 'System') return true;
+  if (s.group === 'background') return true;
+  const name = (s.name || '').toLowerCase();
+  if (
+    name === 'system' ||
+    name.startsWith('svchost') ||
+    name === 'spoolsv.exe' ||
+    name === 'lsass.exe' ||
+    name === 'wininit.exe' ||
+    name === 'csrss.exe' ||
+    name === 'services.exe' ||
+    name === 'smss.exe' ||
+    name === 'launchd' ||
+    name === 'kernel_task'
+  ) {
+    return true;
+  }
+  const cmd = (s.cmd || '').toLowerCase();
+  const cwd = (s.cwd || '').toLowerCase();
+  if (cmd.includes('\\windows\\system32\\') || cmd.includes('\\windows\\syswow64\\') || cwd.includes('\\windows\\system32\\')) {
+    return true;
+  }
+  if (cmd.startsWith('/system/') || cmd.startsWith('/usr/libexec/') || cmd.startsWith('/usr/sbin/') || cmd.startsWith('/sbin/')) {
+    return true;
+  }
+  return false;
+}
+
+function isConsoleService(s) {
+  return !!s.appId || (s.origin && s.origin.label === '总控台');
+}
+
+function getServiceTier(s) {
+  const pinned = !!s.pinned;
+  const isConsole = isConsoleService(s);
+  const isSystem = isSystemService(s);
+
+  if (pinned) {
+    return { tier: 0, subTier: isConsole ? 0 : isSystem ? 2 : 1 };
+  }
+  if (isConsole) {
+    return { tier: 1, subTier: 0 };
+  }
+  if (!isSystem) {
+    return { tier: 2, subTier: 0 };
+  }
+  return { tier: 3, subTier: 0 };
+}
+
+/* 排序：置顶应用 > 总控台应用 > 用户应用 > 系统应用，按端口升序 */
 function svcSort(a, b) {
-  if (!!a.pinned !== !!b.pinned) return a.pinned ? -1 : 1;
+  const aRank = getServiceTier(a);
+  const bRank = getServiceTier(b);
+
+  if (aRank.tier !== bRank.tier) {
+    return aRank.tier - bRank.tier;
+  }
+  if (aRank.subTier !== bRank.subTier) {
+    return aRank.subTier - bRank.subTier;
+  }
+
   const pa = a.port == null ? Infinity : a.port;
   const pb = b.port == null ? Infinity : b.port;
   if (pa !== pb) return pa - pb;

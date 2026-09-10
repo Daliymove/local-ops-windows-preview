@@ -158,6 +158,28 @@ class OriginAttributionTests(unittest.TestCase):
         origin = server.attribute_origin(100, table)
         self.assertEqual(origin, {"label": "Claude Code", "icon": "bot"})
 
+    def test_console_anchor_with_nested_codex_path_reports_console(self):
+        # 内层父进程命令行中包含 codex 目录，外层祖先持有 console-run 标记，仍应判定为总控台
+        table = self.table(
+            (492, 6912, r'"D:\codex-workspace\framelab\.venv\Scripts\python.exe" D:\codex-workspace\framelab\server.py --port 8765'),
+            (6912, 5156, r'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "D:\codex-workspace\framelab\start.ps1"'),
+            (5156, 27000, r'cmd /d /c C:\Users\86187\AppData\Local\Temp\console-l1lz7_u_.cmd'),
+            (27000, 20192, r'python tools\win_anchor.py console-run:tok456 "D:\codex-workspace\framelab\start.cmd"'),
+            (20192, 1, 'cmd.exe'),
+        )
+        origin = server.attribute_origin(492, table)
+        self.assertEqual(origin, {"label": "总控台", "icon": "rocket"})
+
+    def test_path_keyword_does_not_falsely_identify_agent(self):
+        # 普通脚本目录中含有 codex-workspace，但启动者并不是 codex 可执行文件，不应误判为 Codex
+        table = self.table(
+            (100, 90, r'python "D:\codex-workspace\my-app\app.py"'),
+            (90, 80, r'powershell.exe -NoProfile'),
+            (80, 1, r'WindowsTerminal.exe'),
+        )
+        origin = server.attribute_origin(100, table)
+        self.assertNotEqual((origin or {}).get("label"), "Codex")
+
 
 class ScriptCommandTests(unittest.TestCase):
     @unittest.skipIf(server.IS_WIN, "macOS 运行器/引号语义")

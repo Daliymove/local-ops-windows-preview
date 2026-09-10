@@ -6,11 +6,51 @@ import type { StateResponse } from '../../types/console';
 
 interface SettingsModalProps {
   data: StateResponse | null;
+  pollIntervalSec?: number;
+  onPollIntervalChange?: (sec: number) => void;
 }
 
-export const SettingsModal: React.FC<SettingsModalProps> = ({ data }) => {
+export const SettingsModal: React.FC<SettingsModalProps> = ({
+  data,
+  pollIntervalSec = 2,
+  onPollIntervalChange,
+}) => {
   const { isSettingsOpen, setSettingsOpen, showToast } = useModal();
   const { theme, setTheme } = useTheme();
+  const [intervalInput, setIntervalInput] = React.useState<string>(() => String(pollIntervalSec));
+
+  React.useEffect(() => {
+    setIntervalInput(String(pollIntervalSec));
+  }, [pollIntervalSec, isSettingsOpen]);
+
+  const handleIntervalApply = (val: number) => {
+    if (!Number.isInteger(val) || val <= 0) {
+      showToast('刷新间隔必须为大于 0 的整数');
+      setIntervalInput(String(pollIntervalSec));
+      return;
+    }
+    onPollIntervalChange?.(val);
+    showToast(`数据刷新频率已设置为 ${val} 秒`);
+  };
+
+  const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const text = e.target.value;
+    setIntervalInput(text);
+    const parsed = parseInt(text, 10);
+    if (Number.isInteger(parsed) && parsed > 0) {
+      onPollIntervalChange?.(parsed);
+    }
+  };
+
+  const handleInputBlur = () => {
+    const parsed = parseInt(intervalInput, 10);
+    if (!Number.isInteger(parsed) || parsed <= 0) {
+      setIntervalInput(String(pollIntervalSec));
+      showToast('刷新间隔必须为大于 0 的整数');
+    } else {
+      handleIntervalApply(parsed);
+    }
+  };
 
   // 监听 ESC 键关闭设置中心
   React.useEffect(() => {
@@ -120,6 +160,60 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ data }) => {
                 <Laptop size={15} />
                 <span className="leading-normal">跟随系统</span>
               </button>
+            </div>
+          </div>
+
+          <div className="pt-4 border-t space-y-2.5" style={{ borderColor: 'var(--line)' }}>
+            <div className="flex items-center justify-between gap-4">
+              <div className="min-w-0 flex-1">
+                <div className="font-semibold leading-snug" style={{ color: 'var(--ink)' }}>
+                  数据刷新频率
+                </div>
+                <div className="text-[11px] leading-relaxed mt-1" style={{ color: 'var(--ink-3)' }}>
+                  服务状态与系统指标轮询频率（默认 2 秒，可设大于 0 的整数）
+                </div>
+              </div>
+              <div className="flex items-center gap-1.5 shrink-0">
+                <input
+                  type="number"
+                  min={1}
+                  step={1}
+                  value={intervalInput}
+                  onChange={handleInputChange}
+                  onBlur={handleInputBlur}
+                  onKeyDown={e => {
+                    if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
+                  }}
+                  className="w-16 px-2 py-1 rounded-xl border text-center font-mono text-xs font-bold focus:outline-none focus:border-[var(--accent)]"
+                  style={{
+                    backgroundColor: 'var(--card-2)',
+                    borderColor: 'var(--line)',
+                    color: 'var(--ink)',
+                  }}
+                />
+                <span className="text-xs font-medium" style={{ color: 'var(--ink-3)' }}>
+                  秒
+                </span>
+              </div>
+            </div>
+            <div className="flex items-center gap-1.5 flex-wrap">
+              {[1, 2, 3, 5, 10].map(s => (
+                <button
+                  key={s}
+                  type="button"
+                  onClick={() => {
+                    setIntervalInput(String(s));
+                    handleIntervalApply(s);
+                  }}
+                  className={`px-2.5 py-1 rounded-lg border text-[11px] font-mono font-semibold transition-all cursor-pointer ${
+                    (pollIntervalSec ?? 2) === s
+                      ? 'border-[var(--accent)] bg-[var(--accent-light)] text-[var(--accent)]'
+                      : 'border-[var(--line)] hover:bg-[var(--card-2)] text-[var(--ink-3)]'
+                  }`}
+                >
+                  {s}s{s === 2 ? ' (默认)' : ''}
+                </button>
+              ))}
             </div>
           </div>
 

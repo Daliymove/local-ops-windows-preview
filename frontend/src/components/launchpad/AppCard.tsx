@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import type { AppItem, AppHealth } from '../../types/console';
+import type { AppItem, AppHealth, StateResponse } from '../../types/console';
 import {
   Play, Square, RotateCcw, ArrowUpRight, Copy,
   FileText, Activity, Edit3, Trash2, AlertTriangle, CheckCircle2
@@ -15,9 +15,10 @@ import {
 interface AppCardProps {
   app: AppItem;
   onRefresh: () => void;
+  onMutate?: (updater: (prev: StateResponse | null) => StateResponse | null) => void;
 }
 
-export const AppCard: React.FC<AppCardProps> = ({ app, onRefresh }) => {
+export const AppCard: React.FC<AppCardProps> = ({ app, onRefresh, onMutate }) => {
   const { openConfirm, openAppEdit, openLogDrawer, openPortDiag, openAppDiag, showToast } = useModal();
   const [loading, setLoading] = useState(false);
 
@@ -29,6 +30,12 @@ export const AppCard: React.FC<AppCardProps> = ({ app, onRefresh }) => {
 
   const handleToggle = async () => {
     setLoading(true);
+    const targetRunning = !app.running;
+    onMutate?.(prev => prev ? {
+      ...prev,
+      apps: prev.apps.map(a => a.id === app.id ? { ...a, running: targetRunning } : a),
+    } : prev);
+
     try {
       if (app.running) {
         const res = await api.stopApp(app.id);
@@ -49,6 +56,8 @@ export const AppCard: React.FC<AppCardProps> = ({ app, onRefresh }) => {
           }
         }
       }
+      onRefresh();
+    } catch {
       onRefresh();
     } finally {
       setLoading(false);
@@ -87,12 +96,17 @@ export const AppCard: React.FC<AppCardProps> = ({ app, onRefresh }) => {
       okText: '删除',
       tone: 'danger',
       onConfirm: async () => {
+        onMutate?.(prev => prev ? {
+          ...prev,
+          apps: prev.apps.filter(a => a.id !== app.id),
+        } : prev);
         const res = await api.deleteApp(app.id);
         if (res.ok) {
           showToast(`已删除 ${app.name}`);
           onRefresh();
         } else {
           showToast(`删除失败: ${res.error || '未知错误'}`);
+          onRefresh();
         }
       },
     });

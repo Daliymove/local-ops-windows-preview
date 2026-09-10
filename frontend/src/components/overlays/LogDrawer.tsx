@@ -1,12 +1,14 @@
-import React, { useEffect, useState, useRef, useMemo } from 'react';
+import React, { useEffect, useState, useRef, useMemo, useCallback } from 'react';
 import { useModal } from '../../context/ModalContext';
-import { X, Copy, FileText } from 'lucide-react';
+import { X, Copy, FileText, RotateCw } from 'lucide-react';
 import { api } from '../../services/api';
 
 export const LogDrawer: React.FC = () => {
   const { logDrawerState, closeLogDrawer, showToast } = useModal();
   const [logs, setLogs] = useState('');
   const [autoScroll, setAutoScroll] = useState(true);
+  const [isRefreshing, setIsRefreshing] = useState(false);
+  const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
   const logPreRef = useRef<HTMLPreElement>(null);
 
   const isOpen = !!logDrawerState;
@@ -24,29 +26,33 @@ export const LogDrawer: React.FC = () => {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [isOpen, closeLogDrawer]);
 
-  useEffect(() => {
-    if (!isOpen) return;
-
-    let isSubscribed = true;
-    const fetchLogs = async () => {
+  const fetchLogs = useCallback(async () => {
+    setIsRefreshing(true);
+    try {
       let text = '';
       if (isConsole) {
         text = await api.getConsoleLogs(400);
       } else if (appId) {
         text = await api.getLogs(appId, 400);
       }
-      if (isSubscribed) {
-        setLogs(text || '（暂无日志输出）');
-      }
-    };
+      setLogs(text || '（暂无日志输出）');
+      setLastUpdated(new Date());
+    } catch {
+      // ignore
+    } finally {
+      setIsRefreshing(false);
+    }
+  }, [appId, isConsole]);
+
+  useEffect(() => {
+    if (!isOpen) return;
 
     fetchLogs();
-    const timer = setInterval(fetchLogs, 2000);
+    const timer = setInterval(fetchLogs, 1500);
     return () => {
-      isSubscribed = false;
       clearInterval(timer);
     };
-  }, [isOpen, appId, isConsole]);
+  }, [isOpen, fetchLogs]);
 
   // 清洗 ANSI 终端控制序列，消除控制字符乱码
   const cleanLogs = useMemo(() => {
@@ -99,13 +105,13 @@ export const LogDrawer: React.FC = () => {
                 {isConsole ? '总控台运行日志' : `${appName || '应用'} · 日志`}
               </h3>
               <p className="text-[11px] mono" style={{ color: 'var(--ink-4)' }}>
-                实时轮询最新 400 行输出 · 按 Esc 或点击外部退出
+                实时轮询最新 400 行输出 {lastUpdated ? `· 已更新 ${lastUpdated.toLocaleTimeString()}` : ''} · 按 Esc 退出
               </p>
             </div>
           </div>
 
           <div className="flex items-center gap-2">
-            <label className="flex items-center gap-1.5 text-xs text-[var(--ink-3)] cursor-pointer select-none mr-2">
+            <label className="flex items-center gap-1.5 text-xs text-[var(--ink-3)] cursor-pointer select-none mr-1">
               <input
                 type="checkbox"
                 checked={autoScroll}
@@ -117,9 +123,20 @@ export const LogDrawer: React.FC = () => {
 
             <button
               type="button"
+              onClick={() => fetchLogs()}
+              disabled={isRefreshing}
+              title="立即刷新日志"
+              className="p-2 rounded-xl border hover:bg-[var(--card-2)] text-[var(--ink-3)] hover:text-[var(--ink)] cursor-pointer disabled:opacity-50 transition-colors"
+              style={{ borderColor: 'var(--line)' }}
+            >
+              <RotateCw size={15} className={isRefreshing ? 'animate-spin text-[var(--accent)]' : ''} />
+            </button>
+
+            <button
+              type="button"
               onClick={handleCopy}
               title="复制全部日志"
-              className="p-2 rounded-xl border hover:bg-[var(--card-2)] text-[var(--ink-3)] hover:text-[var(--ink)] cursor-pointer"
+              className="p-2 rounded-xl border hover:bg-[var(--card-2)] text-[var(--ink-3)] hover:text-[var(--ink)] cursor-pointer transition-colors"
               style={{ borderColor: 'var(--line)' }}
             >
               <Copy size={15} />
@@ -129,7 +146,7 @@ export const LogDrawer: React.FC = () => {
               type="button"
               onClick={closeLogDrawer}
               title="关闭 (Esc)"
-              className="p-2 rounded-xl border hover:bg-[var(--card-2)] text-[var(--ink-3)] hover:text-[var(--ink)] cursor-pointer"
+              className="p-2 rounded-xl border hover:bg-[var(--card-2)] text-[var(--ink-3)] hover:text-[var(--ink)] cursor-pointer transition-colors"
               style={{ borderColor: 'var(--line)' }}
             >
               <X size={15} />

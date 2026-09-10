@@ -1,5 +1,5 @@
 import React from 'react';
-import type { ServiceItem } from '../../types/console';
+import type { ServiceItem, StateResponse } from '../../types/console';
 import {
   Pin, EyeOff, Eye, Plus, Trash2, ArrowUpRight,
   Bot, Terminal, Code, Server, Package
@@ -10,9 +10,10 @@ import { api } from '../../services/api';
 interface ServiceRowProps {
   svc: ServiceItem;
   onRefresh: () => void;
+  onMutate?: (updater: (prev: StateResponse | null) => StateResponse | null) => void;
 }
 
-export const ServiceRow: React.FC<ServiceRowProps> = ({ svc, onRefresh }) => {
+export const ServiceRow: React.FC<ServiceRowProps> = ({ svc, onRefresh, onMutate }) => {
   const { openConfirm, openAppEdit, showToast } = useModal();
 
   const handleKill = () => {
@@ -23,12 +24,23 @@ export const ServiceRow: React.FC<ServiceRowProps> = ({ svc, onRefresh }) => {
       tone: 'danger',
       showForce: true,
       onConfirm: async (force?: boolean) => {
+        onMutate?.(prev => {
+          if (!prev) return prev;
+          return {
+            ...prev,
+            services: prev.services.filter(
+              s => s.pid !== svc.pid && s.instanceKey !== svc.instanceKey
+            ),
+          };
+        });
+
         const res = await api.killProcess(svc.pid, force || false);
         if (res.ok) {
           showToast(`已结束进程 ${svc.name} (PID ${svc.pid})`);
           onRefresh();
         } else {
           showToast(`结束进程失败: ${res.error || '未知错误'}`);
+          onRefresh();
         }
       },
     });
@@ -36,12 +48,25 @@ export const ServiceRow: React.FC<ServiceRowProps> = ({ svc, onRefresh }) => {
 
   const handleToggleFlag = async (flag: 'pinned' | 'hidden' | 'promoted') => {
     const nextVal = !svc[flag];
+    onMutate?.(prev => {
+      if (!prev) return prev;
+      return {
+        ...prev,
+        services: prev.services.map(s =>
+          s.instanceKey === svc.instanceKey || s.key === svc.key
+            ? { ...s, [flag]: nextVal }
+            : s
+        ),
+      };
+    });
+
     const res = await api.setServiceFlag(svc.key, flag, nextVal);
     if (res.ok) {
       showToast(nextVal ? '已标记' : '已取消标记');
       onRefresh();
     } else {
       showToast(`操作失败: ${res.error || '未知错误'}`);
+      onRefresh();
     }
   };
 
@@ -143,7 +168,7 @@ export const ServiceRow: React.FC<ServiceRowProps> = ({ svc, onRefresh }) => {
       </td>
 
       <td className="py-3 px-4 mono text-right">
-        <div>{svc.cpu != null && svc.cpu > 0 ? `${svc.cpu.toFixed(1)}%` : '—'}</div>
+        <div>{svc.cpu != null && !isNaN(svc.cpu) ? `${svc.cpu.toFixed(1)}%` : '—'}</div>
         <div className="text-[11px]" style={{ color: 'var(--ink-3)' }}>
           {svc.mem != null ? `${svc.mem.toFixed(1)}%` : '—'}
         </div>

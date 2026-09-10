@@ -14,25 +14,42 @@ import { SettingsModal } from '../overlays/SettingsModal';
 import { PortDiagnosticModal } from '../launchpad/PortDiagnosticModal';
 import { AppDiagnosticModal } from '../launchpad/AppDiagnosticModal';
 import { ToastContainer } from '../common/ToastContainer';
-import { AlertCircle } from 'lucide-react';
+import { AlertCircle, RotateCcw } from 'lucide-react';
 
 export const Shell: React.FC = () => {
-  const { data, connected, view, setView, triggerPoll } = useConsoleState();
+  const {
+    data,
+    connected,
+    isRestarting,
+    view,
+    setView,
+    triggerPoll,
+    pollIntervalSec,
+    setPollIntervalSec,
+    mutateData,
+    restartConsole,
+  } = useConsoleState();
   const { theme, toggleTheme } = useTheme();
 
   return (
     <div className="flex h-screen w-screen overflow-hidden select-none">
-      {!connected && (
+      {isRestarting ? (
+        <div className="fixed top-0 left-0 right-0 z-50 bg-[var(--accent)] text-white text-xs font-semibold py-1.5 px-4 flex items-center justify-center gap-2 shadow-md animate-in fade-in slide-in-from-top duration-200">
+          <RotateCcw size={14} className="animate-spin" />
+          <span>总控台正在重新启动，页面内容已重置，等待核心服务就绪…</span>
+        </div>
+      ) : !connected ? (
         <div className="fixed top-0 left-0 right-0 z-50 bg-amber-600 text-white text-xs font-semibold py-1.5 px-4 flex items-center justify-center gap-2 shadow-md">
           <AlertCircle size={14} />
           <span>控制台连接断开，正在自动尝试重连…</span>
         </div>
-      )}
+      ) : null}
 
       <RailNav
         currentView={view}
         onViewChange={setView}
         connected={connected}
+        isRestarting={isRestarting}
         data={data}
       />
 
@@ -43,15 +60,17 @@ export const Shell: React.FC = () => {
           data={data}
           theme={theme}
           onToggleTheme={toggleTheme}
+          isRestarting={isRestarting}
+          onRestartConsole={restartConsole}
         />
 
         <div className="flex flex-1 min-h-0 overflow-hidden">
           <main className="flex-1 overflow-y-auto p-6 min-w-0">
             <div key={view} className="animate-page-enter h-full">
               {view === 'launchpad' ? (
-                <LaunchpadView data={data} onRefresh={triggerPoll} />
+                <LaunchpadView data={data} isRestarting={isRestarting} onRefresh={triggerPoll} onMutate={mutateData} />
               ) : (
-                <ServicesView data={data} onRefresh={triggerPoll} />
+                <ServicesView data={data} isRestarting={isRestarting} onRefresh={triggerPoll} onMutate={mutateData} />
               )}
             </div>
           </main>
@@ -63,8 +82,12 @@ export const Shell: React.FC = () => {
       <AppEditModal onUpdated={triggerPoll} iconsDir={data?.iconsDir} />
       <LogDrawer />
       <ConfirmDialog />
-      <CmdkModal data={data} onViewChange={setView} />
-      <SettingsModal data={data} />
+      <CmdkModal data={data} onViewChange={setView} onRefresh={triggerPoll} />
+      <SettingsModal
+        data={data}
+        pollIntervalSec={pollIntervalSec}
+        onPollIntervalChange={setPollIntervalSec}
+      />
       <PortDiagnosticModal onUpdated={triggerPoll} />
       <AppDiagnosticModal />
       <ToastContainer />
