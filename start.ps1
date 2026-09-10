@@ -2,7 +2,9 @@ param(
     [int]$Port = 0,
     [switch]$NoBrowser,
     [switch]$RebuildFrontend,
-    [switch]$Dev
+    [switch]$Dev,
+    [switch]$Silent,
+    [switch]$Background
 )
 
 $ErrorActionPreference = "Stop"
@@ -74,6 +76,33 @@ if (Test-Path -LiteralPath $frontendDir) {
 }
 
 $serverScript = Join-Path $appDir "server.py"
+
+if ($Silent -or $Background) {
+    $pyw = $pyExe -replace 'python\.exe$', 'pythonw.exe'
+    if (-not (Test-Path -LiteralPath $pyw)) {
+        $pyw = $pyExe
+    }
+    $bgArgs = @("-X", "utf8", "-u", $serverScript, "--launcher")
+    if ($Port -gt 0) {
+        $bgArgs += @("--preferred-port", [string]$Port)
+    }
+    if ($NoBrowser) {
+        $bgArgs += "--no-browser"
+    }
+    if ($Dev) {
+        $bgArgs += "--dev"
+    }
+    if ($args) {
+        $bgArgs += $args
+    }
+
+    $proc = Start-Process -FilePath $pyw -ArgumentList $bgArgs -WorkingDirectory $appDir -WindowStyle Hidden -PassThru
+    Write-Host "Local Ops Console started in background (PID: $($proc.Id))."
+    Write-Host "Web UI: http://127.0.0.1:9600/"
+    Write-Host "To stop: Run .\stop.cmd or use 'Stop Console' in Web UI."
+    exit 0
+}
+
 $serverArgs = @("-X", "utf8", "-u", $serverScript)
 
 if ($Port -gt 0) {

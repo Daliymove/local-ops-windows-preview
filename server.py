@@ -4825,9 +4825,14 @@ def find_console_instances():
     candidates = []
     for pid, info in snap.items():
         args = info.get("args") or ""
+        comm = (info.get("comm") or "").lower()
         if (pid == SELF_PID or info.get("uid") != SELF_UID
                 or "server.py" not in args
-                or "--restart-helper" in args):
+                or "--restart-helper" in args
+                or "--stop" in args
+                or "--prepare-storage" in args):
+            continue
+        if IS_WIN and ("cmd" in comm or "powershell" in comm or "pwsh" in comm or "wscript" in comm):
             continue
         candidates.append(pid)
     cwds = lsof_cwds(candidates)
@@ -5252,6 +5257,39 @@ if __name__ == "__main__":
         prepare_runtime_storage()
     elif "--launcher" in sys.argv:
         launcher_main()
+    elif "--stop" in sys.argv:
+        try:
+            instances = find_console_instances()
+            if not instances:
+                print("总控台未在运行。")
+                sys.exit(0)
+            stopped = False
+            for item in instances:
+                ports = item.get("ports", [])
+                for p in ports:
+                    try:
+                        req = urllib.request.Request(
+                            "http://%s:%d/api/console/stop" % (HOST, p),
+                            data=b"{}",
+                            headers={"Content-Type": "application/json"},
+                            method="POST",
+                        )
+                        with urllib.request.urlopen(req, timeout=3):
+                            stopped = True
+                            break
+                    except Exception:
+                        pass
+                if not stopped and item.get("pid"):
+                    stop_pid_tree(item["pid"])
+                    stopped = True
+            print("总控台已停止。" if stopped else "停止指令已发送。")
+            sys.exit(0)
+        except SystemExit:
+            raise
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            sys.exit(1)
     elif "--restart-helper" in sys.argv:
         index = sys.argv.index("--restart-helper")
         try:
