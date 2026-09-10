@@ -1,4 +1,4 @@
-﻿import unittest
+import unittest
 import server
 from tests.test_hardening import HttpHarness
 

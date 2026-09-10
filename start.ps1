@@ -4,7 +4,8 @@ param(
     [switch]$RebuildFrontend,
     [switch]$Dev,
     [switch]$Silent,
-    [switch]$Background
+    [switch]$Background,
+    [switch]$Stop
 )
 
 $ErrorActionPreference = "Stop"
@@ -40,6 +41,12 @@ function Resolve-Python {
 }
 
 $pyExe = Resolve-Python
+$serverScript = Join-Path $appDir "server.py"
+
+if ($Stop) {
+    & $pyExe -X utf8 -u $serverScript --stop
+    exit $LASTEXITCODE
+}
 
 # Check if frontend needs build or dependency install
 if (Test-Path -LiteralPath $frontendDir) {
@@ -74,8 +81,6 @@ if (Test-Path -LiteralPath $frontendDir) {
         }
     }
 }
-
-$serverScript = Join-Path $appDir "server.py"
 
 if ($Silent -or $Background) {
     $pyw = $pyExe -replace 'python\.exe$', 'pythonw.exe'

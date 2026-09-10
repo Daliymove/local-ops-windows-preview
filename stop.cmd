@@ -1,3 +1,5 @@
 @echo off
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0stop.ps1" %*
+setlocal
+set "SCRIPT_DIR=%~dp0"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "& '%SCRIPT_DIR%start.ps1' -Stop"
 if errorlevel 1 pause
