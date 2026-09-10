@@ -69,74 +69,74 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ data }) => {
             <Settings size={22} />
           </div>
           <div>
-            <h3 className="text-base font-bold">设置中心</h3>
-            <p className="text-xs" style={{ color: 'var(--ink-3)' }}>
+            <h3 className="text-base font-bold leading-tight">设置中心</h3>
+            <p className="text-xs leading-relaxed mt-1" style={{ color: 'var(--ink-3)' }}>
               外观偏好与控制台参数
             </p>
           </div>
         </div>
 
         <div className="space-y-5 text-xs">
-          <div className="space-y-2">
-            <label className="font-semibold" style={{ color: 'var(--ink)' }}>
+          <div className="space-y-2.5">
+            <label className="font-semibold leading-normal block" style={{ color: 'var(--ink)' }}>
               外观模式
             </label>
             <div className="grid grid-cols-3 gap-2">
               <button
                 type="button"
                 onClick={() => setTheme('light')}
-                className={`flex items-center justify-center gap-2 p-3 rounded-xl border font-medium cursor-pointer transition-all ${
+                className={`flex items-center justify-center gap-2 p-3 rounded-xl border font-medium cursor-pointer transition-all leading-normal ${
                   theme === 'light'
                     ? 'border-[var(--accent)] bg-[var(--accent-light)] text-[var(--accent)] font-bold'
                     : 'border-[var(--line)] hover:bg-[var(--card-2)] text-[var(--ink-2)]'
                 }`}
               >
                 <Sun size={15} />
-                <span>浅色模式</span>
+                <span className="leading-normal">浅色模式</span>
               </button>
 
               <button
                 type="button"
                 onClick={() => setTheme('dark')}
-                className={`flex items-center justify-center gap-2 p-3 rounded-xl border font-medium cursor-pointer transition-all ${
+                className={`flex items-center justify-center gap-2 p-3 rounded-xl border font-medium cursor-pointer transition-all leading-normal ${
                   theme === 'dark'
                     ? 'border-[var(--accent)] bg-[var(--accent-light)] text-[var(--accent)] font-bold'
                     : 'border-[var(--line)] hover:bg-[var(--card-2)] text-[var(--ink-2)]'
                 }`}
               >
                 <Moon size={15} />
-                <span>深色模式</span>
+                <span className="leading-normal">深色模式</span>
               </button>
 
               <button
                 type="button"
                 onClick={() => setTheme('auto')}
-                className={`flex items-center justify-center gap-2 p-3 rounded-xl border font-medium cursor-pointer transition-all ${
+                className={`flex items-center justify-center gap-2 p-3 rounded-xl border font-medium cursor-pointer transition-all leading-normal ${
                   theme === 'auto'
                     ? 'border-[var(--accent)] bg-[var(--accent-light)] text-[var(--accent)] font-bold'
                     : 'border-[var(--line)] hover:bg-[var(--card-2)] text-[var(--ink-2)]'
                 }`}
               >
                 <Laptop size={15} />
-                <span>跟随系统</span>
+                <span className="leading-normal">跟随系统</span>
               </button>
             </div>
           </div>
 
           <div className="pt-4 border-t space-y-2" style={{ borderColor: 'var(--line)' }}>
-            <div className="flex items-center justify-between">
-              <div>
-                <div className="font-semibold" style={{ color: 'var(--ink)' }}>
+            <div className="flex items-center justify-between gap-4">
+              <div className="min-w-0 flex-1">
+                <div className="font-semibold leading-snug" style={{ color: 'var(--ink)' }}>
                   批处理任务桌面通知
                 </div>
-                <div className="text-[11px] mt-0.5" style={{ color: 'var(--ink-3)' }}>
+                <div className="text-[11px] leading-relaxed mt-1" style={{ color: 'var(--ink-3)' }}>
                   当一次性批处理任务执行完毕时，在后台接收系统通知提醒
                 </div>
               </div>
               <button
                 type="button"
                 onClick={requestNotificationPermission}
-                className="px-3 py-1.5 rounded-xl border text-xs font-semibold hover:bg-[var(--card-2)] transition-colors cursor-pointer shrink-0"
+                className="px-3 py-1.5 rounded-xl border text-xs font-semibold leading-normal hover:bg-[var(--card-2)] transition-colors cursor-pointer shrink-0"
                 style={{ borderColor: 'var(--line)', color: 'var(--accent)' }}
               >
                 授权通知
@@ -145,12 +145,12 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ data }) => {
           </div>
 
           <div
-            className="p-3.5 rounded-xl border text-[11px] mono space-y-1"
+            className="p-3.5 rounded-xl border text-[11px] mono space-y-2 leading-relaxed"
             style={{ backgroundColor: 'var(--card-2)', borderColor: 'var(--line)', color: 'var(--ink-3)' }}
           >
-            <div>控制台版本: v{data?.version || '1.0.0'}</div>
-            <div>运行环境: Python 3.12+ · 回环绑定 127.0.0.1:{data?.consolePort || 9600}</div>
-            <div>数据目录: {data?.consoleCwd || '—'}</div>
+            <div className="leading-relaxed">控制台版本: v{data?.version || '1.0.0'}</div>
+            <div className="leading-relaxed">运行环境: Python 3.12+ · 回环绑定 127.0.0.1:{data?.consolePort || 9600}</div>
+            <div className="leading-relaxed break-all">数据目录: {data?.consoleCwd || '—'}</div>
           </div>
         </div>
 
