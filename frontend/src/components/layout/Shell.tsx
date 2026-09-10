@@ -47,18 +47,20 @@ export const Shell: React.FC = () => {
 
         <div className="flex flex-1 min-h-0 overflow-hidden">
           <main className="flex-1 overflow-y-auto p-6 min-w-0">
-            {view === 'launchpad' ? (
-              <LaunchpadView data={data} onRefresh={triggerPoll} />
-            ) : (
-              <ServicesView data={data} onRefresh={triggerPoll} />
-            )}
+            <div key={view} className="animate-page-enter h-full">
+              {view === 'launchpad' ? (
+                <LaunchpadView data={data} onRefresh={triggerPoll} />
+              ) : (
+                <ServicesView data={data} onRefresh={triggerPoll} />
+              )}
+            </div>
           </main>
 
           <RightSidebar data={data} onRefresh={triggerPoll} />
         </div>
       </div>
 
-      <AppEditModal onUpdated={triggerPoll} />
+      <AppEditModal onUpdated={triggerPoll} iconsDir={data?.iconsDir} />
       <LogDrawer />
       <ConfirmDialog />
       <CmdkModal data={data} onViewChange={setView} />

@@ -41,9 +41,16 @@ export const CmdkModal: React.FC<CmdkModalProps> = ({ data, onViewChange }) => {
   );
 
   return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center pt-24 p-4 bg-black/60 backdrop-blur-xs animate-in fade-in">
+    <div
+      onClick={e => {
+        if (e.target === e.currentTarget) {
+          setCmdkOpen(false);
+        }
+      }}
+      className="fixed inset-0 z-50 flex items-start justify-center pt-24 p-4 bg-black/60 backdrop-blur-xs animate-backdrop-in"
+    >
       <div
-        className="w-full max-w-xl rounded-2xl border shadow-2xl overflow-hidden select-none animate-in zoom-in-95 duration-150"
+        className="w-full max-w-xl rounded-2xl border shadow-2xl overflow-hidden select-none animate-cmdk-in"
         style={{
           backgroundColor: 'var(--card)',
           borderColor: 'var(--line-2)',

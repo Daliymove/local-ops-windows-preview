@@ -28,7 +28,7 @@ export const ServiceRow: React.FC<ServiceRowProps> = ({ svc, onRefresh }) => {
           showToast(`已结束进程 ${svc.name} (PID ${svc.pid})`);
           onRefresh();
         } else {
-          showToast(`结束进程失败: ${res.error}`);
+          showToast(`结束进程失败: ${res.error || '未知错误'}`);
         }
       },
     });
@@ -41,7 +41,7 @@ export const ServiceRow: React.FC<ServiceRowProps> = ({ svc, onRefresh }) => {
       showToast(nextVal ? '已标记' : '已取消标记');
       onRefresh();
     } else {
-      showToast(`操作失败: ${res.error}`);
+      showToast(`操作失败: ${res.error || '未知错误'}`);
     }
   };
 

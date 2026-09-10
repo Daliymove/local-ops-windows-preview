@@ -31,7 +31,7 @@ export const RailNav: React.FC<RailNavProps> = ({
           type="button"
           onClick={() => onViewChange('launchpad')}
           title="启动台"
-          className={`flex flex-col items-center justify-center w-12 h-12 rounded-xl transition-all duration-150 cursor-pointer ${
+          className={`flex flex-col items-center justify-center w-12 h-12 rounded-xl transition-all duration-200 cursor-pointer active:scale-95 ${
             currentView === 'launchpad'
               ? 'text-white shadow-md'
               : 'text-[var(--ink-3)] hover:text-[var(--ink)] hover:bg-[var(--card-2)]'
@@ -48,7 +48,7 @@ export const RailNav: React.FC<RailNavProps> = ({
           type="button"
           onClick={() => onViewChange('services')}
           title="服务监控"
-          className={`flex flex-col items-center justify-center w-12 h-12 rounded-xl transition-all duration-150 cursor-pointer ${
+          className={`flex flex-col items-center justify-center w-12 h-12 rounded-xl transition-all duration-200 cursor-pointer active:scale-95 ${
             currentView === 'services'
               ? 'text-white shadow-md'
               : 'text-[var(--ink-3)] hover:text-[var(--ink)] hover:bg-[var(--card-2)]'
@@ -67,7 +67,7 @@ export const RailNav: React.FC<RailNavProps> = ({
           type="button"
           onClick={() => openLogDrawer({ isConsole: true, appName: '总控台日志' })}
           title="日志中心 (⌘J)"
-          className="flex flex-col items-center justify-center w-12 h-12 rounded-xl transition-all duration-150 text-[var(--ink-3)] hover:text-[var(--ink)] hover:bg-[var(--card-2)] cursor-pointer"
+          className="flex flex-col items-center justify-center w-12 h-12 rounded-xl transition-all duration-200 text-[var(--ink-3)] hover:text-[var(--ink)] hover:bg-[var(--card-2)] cursor-pointer active:scale-95"
         >
           <FileText size={20} />
           <span className="text-[10px] mt-1 font-medium leading-none">日志</span>
@@ -76,8 +76,8 @@ export const RailNav: React.FC<RailNavProps> = ({
         <button
           type="button"
           onClick={() => setSettingsOpen(true)}
-          title="设置中心"
-          className="flex flex-col items-center justify-center w-12 h-12 rounded-xl transition-all duration-150 text-[var(--ink-3)] hover:text-[var(--ink)] hover:bg-[var(--card-2)] cursor-pointer"
+          title="设置中心 (⌘,)"
+          className="flex flex-col items-center justify-center w-12 h-12 rounded-xl transition-all duration-200 text-[var(--ink-3)] hover:text-[var(--ink)] hover:bg-[var(--card-2)] cursor-pointer active:scale-95"
         >
           <Settings size={20} />
           <span className="text-[10px] mt-1 font-medium leading-none">设置</span>

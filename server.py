@@ -10,6 +10,7 @@ API 契约与实现要点见 AGENTS.md。
 """
 
 import atexit
+import base64
 import glob
 import functools
 import errno
@@ -1640,11 +1641,32 @@ def build_apps(cfg, listeners, groups=None):
         except Exception as exc:
             LOG.warning("检查应用配置失败（%s）：%s", app.get("id"), exc)
             health = {"status": "unknown", "blocking": False, "issues": []}
+
+        icon_type = app.get("iconType")
+        icon_path = app.get("iconSourcePath")
+        if app.get("icon"):
+            if not icon_type and app.get("cwd"):
+                preset = _detect_project_favicon(app["cwd"])
+                if preset:
+                    icon_type = "preset"
+                    icon_path = preset["fullPath"]
+                else:
+                    icon_type = "custom"
+                    icon_path = os.path.join(ICONS_DIR, os.path.basename(app["icon"]))
+            elif icon_type == "preset" and not icon_path and app.get("cwd"):
+                preset = _detect_project_favicon(app["cwd"])
+                if preset:
+                    icon_path = preset["fullPath"]
+            elif not icon_path:
+                icon_path = os.path.join(ICONS_DIR, os.path.basename(app["icon"]))
+
         apps.append({
             "id": app["id"], "name": app["name"], "command": app["command"],
             "cwd": app.get("cwd"), "port": port, "openUrl": app.get("openUrl"),
             "emoji": app.get("emoji"), "glyph": app.get("glyph"), "icon": app.get("icon"),
             "favicon": app.get("favicon"),
+            "iconType": icon_type,
+            "iconPath": icon_path,
             "running": bool(live), "pid": pid,
             "uptimeSec": ((snap.get(pid) or listener_snap.get(pid) or {}).get("etime")
                           if pid else None),
@@ -1706,6 +1728,7 @@ def build_state(cfg, console_port, config_health=None):
         "consolePort": console_port,
         "consolePid": SELF_PID,
         "consoleCwd": BASE_DIR,
+        "iconsDir": ICONS_DIR,
         "platform": sys.platform,
         "version": APP_VERSION,
         "schemaVersion": cfg.get("schemaVersion", CURRENT_SCHEMA_VERSION),
@@ -2099,47 +2122,170 @@ def stop_app_for_update(cfg, app, timeout=5.0):
     return ok, error, bool(ok)
 
 
-def pick_path(what):
-    """macOS 原生文件/目录选择框（osascript）。返回 (path|None, canceled)。"""
-    if IS_WIN:
-        return _pick_path_windows(what)
-    if what == "dir":
-        script = 'POSIX path of (choose folder with prompt "选择工作目录")'
-    else:
-        script = 'POSIX path of (choose file with prompt "选择批处理脚本")'
-    try:
-        r = subprocess.run(["osascript", "-e", script],
-                           capture_output=True, text=True, timeout=180)
-    except Exception:
-        return None, False
-    if r.returncode != 0:  # 用户按了取消（"User canceled."）
+_pick_lock = threading.Lock()
+
+
+def pick_path(what, initial_dir=""):
+    """macOS / Windows 原生文件/目录选择框。返回 (path|None, canceled)。"""
+    if not _pick_lock.acquire(blocking=False):
+        # 避免并发打开多个原生对话框导致相互刷新和冲突
         return None, True
-    return r.stdout.strip().rstrip("/") or None, False
-
-
-def _pick_path_windows(what):
-    """Windows 原生对话框（PowerShell + WinForms）。返回 (path|None, canceled)。"""
-    if what == "dir":
-        script = (
-            "Add-Type -AssemblyName System.Windows.Forms; "
-            "$f = New-Object System.Windows.Forms.FolderBrowserDialog; "
-            "$f.Description = '选择工作目录'; "
-            "$f.ShowNewFolderButton = $true; "
-            "if ($f.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) "
-            "{ $f.SelectedPath } else { '__CANCELED__' }")
-    else:
-        script = (
-            "Add-Type -AssemblyName System.Windows.Forms; "
-            "$f = New-Object System.Windows.Forms.OpenFileDialog; "
-            "$f.Title = '选择批处理脚本'; "
-            "$f.Filter = '脚本文件 (*.py;*.ps1;*.bat;*.cmd;*.sh)|*.py;*.ps1;*.bat;*.cmd;*.sh|所有文件 (*.*)|*.*'; "
-            "if ($f.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) "
-            "{ $f.FileName } else { '__CANCELED__' }")
     try:
+        if IS_WIN:
+            return _pick_path_windows(what, initial_dir)
+        if what == "dir":
+            if initial_dir and os.path.isdir(initial_dir):
+                safe_init = initial_dir.replace('"', '\\"')
+                script = f'POSIX path of (choose folder with prompt "选择工作目录" default location POSIX file "{safe_init}")'
+            else:
+                script = 'POSIX path of (choose folder with prompt "选择工作目录")'
+        else:
+            if initial_dir and os.path.isdir(initial_dir):
+                safe_init = initial_dir.replace('"', '\\"')
+                script = f'POSIX path of (choose file with prompt "选择批处理脚本" default location POSIX file "{safe_init}")'
+            else:
+                script = 'POSIX path of (choose file with prompt "选择批处理脚本")'
+        try:
+            r = subprocess.run(["osascript", "-e", script],
+                               capture_output=True, text=True, timeout=180)
+        except Exception:
+            return None, False
+        if r.returncode != 0:  # 用户按了取消（"User canceled."）
+            return None, True
+        return r.stdout.strip().rstrip("/") or None, False
+    finally:
+        _pick_lock.release()
+
+
+def _pick_path_windows(what, initial_dir=""):
+    """Windows 原生对话框（高分辨率 Per-Monitor V2 + 现代资源管理器 Explorer 风格）。返回 (path|None, canceled)。"""
+    csharp_code = r'''
+using System;
+using System.Reflection;
+using System.Windows.Forms;
+using System.Runtime.InteropServices;
+
+public class NativePicker {
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool SetProcessDpiAwarenessContext(IntPtr dpiContext);
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr GetForegroundWindow();
+
+    private static readonly IntPtr DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 = new IntPtr(-4);
+
+    public static void EnableHighDpi() {
+        try {
+            SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+        } catch {}
+        try {
+            Application.EnableVisualStyles();
+        } catch {}
+    }
+
+    public static string ShowFolder(string title, string initialDir) {
+        EnableHighDpi();
+        OpenFileDialog ofd = new OpenFileDialog();
+        ofd.Title = string.IsNullOrEmpty(title) ? "选择工作目录" : title;
+        ofd.Filter = "文件夹|*.none";
+        ofd.AddExtension = false;
+        ofd.CheckFileExists = false;
+        ofd.DereferenceLinks = true;
+        ofd.AutoUpgradeEnabled = true;
+        if (!string.IsNullOrEmpty(initialDir) && System.IO.Directory.Exists(initialDir)) {
+            ofd.InitialDirectory = initialDir;
+        }
+
+        try {
+            Assembly asm = typeof(OpenFileDialog).Assembly;
+            Type ifdType = asm.GetType("System.Windows.Forms.FileDialogNative+IFileDialog");
+            Type fosType = asm.GetType("System.Windows.Forms.FileDialogNative+FOS");
+            Type sType = asm.GetType("System.Windows.Forms.FileDialogNative+IShellItem");
+            Type sigdnType = asm.GetType("System.Windows.Forms.FileDialogNative+SIGDN");
+
+            BindingFlags flags = BindingFlags.Instance | BindingFlags.NonPublic;
+            object ifd = ofd.GetType().GetMethod("CreateVistaDialog", flags).Invoke(ofd, null);
+            uint options = (uint)typeof(FileDialog).GetMethod("GetOptions", flags).Invoke(ofd, null);
+            uint fosPickFolders = (uint)Enum.Parse(fosType, "FOS_PICKFOLDERS");
+            options |= fosPickFolders;
+            ifdType.GetMethod("SetOptions").Invoke(ifd, new object[] { Enum.ToObject(fosType, options) });
+
+            IntPtr owner = GetForegroundWindow();
+            int hr = (int)ifdType.GetMethod("Show").Invoke(ifd, new object[] { owner });
+            if (hr == 0) {
+                object[] getResultArgs = new object[] { null };
+                ifdType.GetMethod("GetResult").Invoke(ifd, getResultArgs);
+                object shellItem = getResultArgs[0];
+                if (shellItem != null) {
+                    object sigdn = Enum.Parse(sigdnType, "SIGDN_FILESYSPATH");
+                    object[] getDisplayNameArgs = new object[] { sigdn, null };
+                    sType.GetMethod("GetDisplayName").Invoke(shellItem, getDisplayNameArgs);
+                    return (string)getDisplayNameArgs[1];
+                }
+            }
+            return "__CANCELED__";
+        } catch {
+            try {
+                FolderBrowserDialog fbd = new FolderBrowserDialog();
+                fbd.Description = title ?? "选择工作目录";
+                fbd.ShowNewFolderButton = true;
+                if (fbd.ShowDialog() == DialogResult.OK) {
+                    return fbd.SelectedPath;
+                }
+            } catch {}
+            return "__CANCELED__";
+        }
+    }
+
+    public static string ShowScript(string title, string filter, string initialDir) {
+        EnableHighDpi();
+        OpenFileDialog ofd = new OpenFileDialog();
+        ofd.Title = string.IsNullOrEmpty(title) ? "选择批处理脚本" : title;
+        ofd.Filter = string.IsNullOrEmpty(filter) ? "脚本文件 (*.py;*.ps1;*.bat;*.cmd;*.sh)|*.py;*.ps1;*.bat;*.cmd;*.sh|所有文件 (*.*)|*.*" : filter;
+        ofd.CheckFileExists = true;
+        ofd.AutoUpgradeEnabled = true;
+        if (!string.IsNullOrEmpty(initialDir) && System.IO.Directory.Exists(initialDir)) {
+            ofd.InitialDirectory = initialDir;
+        }
+        try {
+            NativeWindow win = new NativeWindow();
+            IntPtr owner = GetForegroundWindow();
+            if (owner != IntPtr.Zero) {
+                win.AssignHandle(owner);
+            }
+            DialogResult res = ofd.ShowDialog(win);
+            if (owner != IntPtr.Zero) {
+                win.ReleaseHandle();
+            }
+            return res == DialogResult.OK ? ofd.FileName : "__CANCELED__";
+        } catch {
+            return "__CANCELED__";
+        }
+    }
+}
+'''
+    safe_dir = str(initial_dir).replace("'", "''") if initial_dir else ""
+    if what == "dir":
+        call_expr = f"[NativePicker]::ShowFolder('选择工作目录', '{safe_dir}')"
+    else:
+        call_expr = f"[NativePicker]::ShowScript('选择批处理脚本', '脚本文件 (*.py;*.ps1;*.bat;*.cmd;*.sh)|*.py;*.ps1;*.bat;*.cmd;*.sh|所有文件 (*.*)|*.*', '{safe_dir}')"
+
+    ps_script = f"""$ProgressPreference = 'SilentlyContinue'
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+$code = @'
+{csharp_code}
+'@
+Add-Type -TypeDefinition $code -ReferencedAssemblies "System.Windows.Forms"
+[NativePicker]::EnableHighDpi()
+$result = {call_expr}
+[Console]::WriteLine($result)
+"""
+    try:
+        encoded = base64.b64encode(ps_script.encode("utf-16le")).decode("ascii")
         r = subprocess.run(
             ["powershell", "-NoProfile", "-NonInteractive",
-             "-ExecutionPolicy", "Bypass", "-Command", script],
-            capture_output=True, text=True, errors="replace", timeout=180)
+             "-ExecutionPolicy", "Bypass", "-EncodedCommand", encoded],
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=180)
     except Exception:
         return None, False
     if r.returncode != 0:
@@ -2147,7 +2293,8 @@ def _pick_path_windows(what):
     text = r.stdout.strip()
     if text == "__CANCELED__":
         return None, True
-    return text.rstrip("/") or None, False
+    return text.rstrip("/\\") or None, False
+
 
 
 def command_for_script(path):
@@ -2412,6 +2559,63 @@ def _package_default_port(script_name, command, dependencies):
     return None
 
 
+def sniff_image(data):
+    """magic bytes 校验 → "png" / "jpg" / "webp" / None。"""
+    if len(data) >= 8 and data[:8] == b"\x89PNG\r\n\x1a\n":
+        return "png"
+    if len(data) >= 3 and data[:3] == b"\xff\xd8\xff":
+        return "jpg"
+    if len(data) >= 12 and data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "webp"
+    return None
+
+
+def sniff_icon_bytes(data, ctype=""):
+    """→ "png" / "jpg" / "webp" / "ico" / None。拒绝主动 SVG 内容。"""
+    if len(data) >= 4 and (data[:4] == b"\x00\x00\x01\x00" or data[:4] == b"\x00\x00\x02\x00"):
+        return "ico"
+    if len(data) >= 6 and data[:2] == b"\x00\x00" and data[2] in (1, 2) and data[3] == 0:
+        return "ico"
+    ext = sniff_image(data)
+    if ext:
+        return ext
+    if ctype and any(t in ctype.lower() for t in ("image/x-icon", "image/vnd.microsoft.icon", "image/ico")):
+        return "ico"
+    return None
+
+
+def _detect_project_favicon(root):
+    """检测项目目录下的预设图标（必须位于 public/ 目录且以 favicon 命名，如 favicon.ico/png/webp）。"""
+    candidates = (
+        ("public/favicon.ico", ("public", "favicon.ico")),
+        ("public/favicon.png", ("public", "favicon.png")),
+        ("public/favicon.webp", ("public", "favicon.webp")),
+        ("public/favicon.jpg", ("public", "favicon.jpg")),
+        ("public/favicon.jpeg", ("public", "favicon.jpeg")),
+    )
+    for rel_name, parts in candidates:
+        full_path = os.path.join(root, *parts)
+        if os.path.isfile(full_path):
+            try:
+                if os.path.getsize(full_path) > 1024 * 1024:
+                    continue
+                with open(full_path, "rb") as f:
+                    raw = f.read()
+                kind = sniff_icon_bytes(raw)
+                if kind:
+                    mime = "image/x-icon" if kind == "ico" else ("image/jpeg" if kind == "jpg" else f"image/{kind}")
+                    b64 = base64.b64encode(raw).decode("ascii")
+                    return {
+                        "source": rel_name,
+                        "fullPath": full_path,
+                        "dataUrl": f"data:{mime};base64,{b64}",
+                        "kind": kind,
+                    }
+            except OSError:
+                continue
+    return None
+
+
 def detect_project(root):
     """只读分析项目根目录，返回可由启动台直接使用的启动候选。"""
     if not isinstance(root, str) or not root.strip():
@@ -2634,12 +2838,16 @@ def detect_project(root):
         add(py_module + " http.server 8000", "静态网站预览", "index.html", 8000, 90)
 
     candidates.sort(key=lambda item: item.pop("_priority"))
+    favicon_info = _detect_project_favicon(root)
+    if favicon_info:
+        note_file(favicon_info["source"])
     return {
         "ok": True,
         "cwd": root,
         "name": os.path.basename(root) or root,
         "files": detected_files,
         "candidates": candidates[:8],
+        "presetIcon": favicon_info,
     }, None
 
 
@@ -2920,9 +3128,39 @@ def _tail_file_lines(path, count, block_size=65536):
                 chunks.append(chunk)
                 newlines += chunk.count(b"\n")
         data = b"".join(reversed(chunks))
-        return data.decode("utf-8", errors="replace").splitlines()[-count:]
+        return _decode_log_lines(data, count)
     except OSError:
         return []
+
+
+def _decode_log_line(raw):
+    if not raw:
+        return ""
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        pass
+    try:
+        return raw.decode("gb18030")
+    except UnicodeDecodeError:
+        pass
+    try:
+        import locale
+        enc = locale.getpreferredencoding(False)
+        if enc and enc.lower().replace("-", "").replace("_", "") not in (
+                "utf8", "gb18030", "gbk", "cp936"):
+            return raw.decode(enc)
+    except Exception:
+        pass
+    return raw.decode("utf-8", errors="replace")
+
+
+def _decode_log_lines(data, count):
+    if not data:
+        return []
+    raw_lines = data.splitlines()
+    selected = raw_lines[-count:] if count > 0 else raw_lines
+    return [_decode_log_line(l) for l in selected]
 
 
 def read_log_tail(app_id, count):
@@ -2952,17 +3190,6 @@ def start_log_maintenance():
                 LOG.exception("日志维护失败")
             time.sleep(LOG_MAINTENANCE_SEC)
     threading.Thread(target=_maintain, daemon=True).start()
-
-
-def sniff_image(data):
-    """magic bytes 校验 → "png" / "jpg" / "webp" / None。"""
-    if len(data) >= 8 and data[:8] == b"\x89PNG\r\n\x1a\n":
-        return "png"
-    if len(data) >= 3 and data[:3] == b"\xff\xd8\xff":
-        return "jpg"
-    if len(data) >= 12 and data[:4] == b"RIFF" and data[8:12] == b"WEBP":
-        return "webp"
-    return None
 
 
 # ---------------------------------------------------------------- 站点图标抓取
@@ -3011,16 +3238,6 @@ def http_get(url, port, timeout=3, limit=262144):
             return r.read(limit), (r.headers.get("Content-Type") or "")
     except Exception:
         return None, None
-
-
-def sniff_icon_bytes(data, ctype=""):
-    """→ "png" / "jpg" / "webp" / "ico" / None。拒绝主动 SVG 内容。"""
-    if len(data) >= 4 and data[:4] == b"\x00\x00\x01\x00":
-        return "ico"
-    ext = sniff_image(data)
-    if ext:
-        return ext
-    return None
 
 
 def fetch_favicon(port, host="127.0.0.1"):
@@ -3286,6 +3503,20 @@ def validate_app_fields(data, partial):
         fields["openUrl"] = open_url
     elif not partial:
         fields["openUrl"] = None
+    if "iconType" in data:
+        it = data["iconType"]
+        if it is not None and it not in ("preset", "custom"):
+            return None, "iconType 必须是 preset/custom 或 null"
+        fields["iconType"] = it
+    elif not partial:
+        fields["iconType"] = None
+    if "iconSourcePath" in data:
+        isp = data["iconSourcePath"]
+        if isp is not None and not isinstance(isp, str):
+            return None, "iconSourcePath 必须是字符串或 null"
+        fields["iconSourcePath"] = (isp or None)
+    elif not partial:
+        fields["iconSourcePath"] = None
     if fields.get("kind") == "task":
         fields["port"] = None  # 批处理任务无端口语义
         fields["openUrl"] = None
@@ -3507,8 +3738,9 @@ class Handler(BaseHTTPRequestHandler):
             return self._deny_request(415, "接口仅接受 application/json")
         if content_kind == "image" and media_type not in (
                 "image/png", "image/jpeg", "image/webp",
+                "image/x-icon", "image/vnd.microsoft.icon", "image/ico", "image/icon",
                 "application/octet-stream"):
-            return self._deny_request(415, "图标接口仅接受 PNG/JPEG/WebP 原始数据")
+            return self._deny_request(415, "图标接口仅接受 ICO/PNG/JPEG/WebP 原始数据")
         if content_kind:
             lengths = self.headers.get_all("Content-Length") or []
             if len(lengths) != 1:
@@ -3536,7 +3768,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header(
             "Content-Security-Policy",
             "default-src 'self'; base-uri 'none'; frame-ancestors 'none'; "
-            "form-action 'self'; connect-src 'self'; img-src 'self' data: blob:; "
+            "form-action 'self'; connect-src 'self' data:; img-src 'self' data: blob:; "
             "font-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'")
         if set_cookie and self._request_host_allowed():
             self.send_header(
@@ -3798,7 +4030,8 @@ class Handler(BaseHTTPRequestHandler):
         if what not in ("dir", "script"):
             self.send_err(400, "what 必须是 dir/script")
             return
-        path, canceled = pick_path(what)
+        initial_dir = str(data.get("initialDir") or "")
+        path, canceled = pick_path(what, initial_dir)
         if canceled:  # 用户取消不是错误，前端静默
             self.send_json({"ok": True, "canceled": True})
         elif not path:
@@ -3971,7 +4204,10 @@ class Handler(BaseHTTPRequestHandler):
                "port": fields["port"], "openUrl": fields.get("openUrl"),
                "emoji": fields["emoji"],
                "glyph": fields["glyph"], "kind": fields["kind"],
-               "icon": None, "favicon": None, "lastPid": None,
+               "icon": None, "favicon": None,
+               "iconType": fields.get("iconType"),
+               "iconSourcePath": fields.get("iconSourcePath"),
+               "lastPid": None,
                "lastPgid": None, "runToken": None,
                "attached": False, "lastExit": None,
                "createdAt": int(time.time())}
@@ -4235,9 +4471,10 @@ class Handler(BaseHTTPRequestHandler):
             self.send_err(400, "图标大小不能超过 5MB")
             return
         raw = self.rfile.read(length)
-        kind = sniff_image(raw)
+        ctype = self.headers.get("Content-Type") or ""
+        kind = sniff_icon_bytes(raw, ctype)
         if kind is None:
-            self.send_err(400, "仅支持 PNG / JPEG / WebP 图片")
+            self.send_err(400, "仅支持 ICO / PNG / JPEG / WebP 图片")
             return
         _ensure_private_dir(ICONS_DIR)
         for ext in ICON_EXTS:

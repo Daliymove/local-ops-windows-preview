@@ -21,10 +21,12 @@ async function request<T = unknown>(
   method: string,
   path: string,
   body?: unknown,
-  isRawBody?: boolean
+  isRawBody?: boolean,
+  timeoutMs: number = REQUEST_TIMEOUT_MS,
+  rawContentType?: string
 ): Promise<ApiResult<T>> {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
 
   const opt: RequestInit = {
     method,
@@ -34,6 +36,9 @@ async function request<T = unknown>(
   if (isRawBody) {
     if (body !== undefined) {
       opt.body = body as BodyInit;
+    }
+    if (rawContentType) {
+      opt.headers = { 'Content-Type': rawContentType };
     }
   } else if (method === 'POST' || method === 'PUT') {
     opt.headers = { 'Content-Type': 'application/json' };
@@ -56,16 +61,32 @@ async function request<T = unknown>(
         ? '访问被拒绝，请从总控台页面重试'
         : `HTTP ${res.status}`;
 
-    let data: Record<string, unknown>;
+    let data: any;
     if (contentType.includes('application/json')) {
       data = await res.json();
     } else {
       const text = (await res.text()).trim();
-      data = { ok: res.ok, error: text || fallbackError };
+      data = { ok: res.ok, error: res.ok ? undefined : (text || fallbackError) };
     }
 
-    if (!res.ok && data.ok !== false) {
-      return { ok: false, error: (data.error as string) || fallbackError };
+    if (!res.ok) {
+      const errorMsg =
+        data && typeof data === 'object' && typeof data.error === 'string' && data.error
+          ? data.error
+          : fallbackError;
+      return {
+        ok: false,
+        error: errorMsg,
+        ...(typeof data === 'object' && data !== null ? data : {}),
+      } as ApiResult<T>;
+    }
+
+    if (data && typeof data === 'object' && !Array.isArray(data)) {
+      if (data.ok === undefined) {
+        data.ok = true;
+      }
+    } else {
+      data = { ok: true, data };
     }
 
     mutationEpoch += 1;
@@ -108,8 +129,17 @@ export const api = {
   updateApp: (id: string, data: Partial<AppItem> & { stopBeforeUpdate?: boolean }) =>
     api.put<AppItem>(`/api/apps/${id}`, data),
   deleteApp: (id: string) => api.del(`/api/apps/${id}`),
-  uploadIcon: (id: string, file: Blob) =>
-    request('POST', `/api/apps/${id}/icon`, file, true),
+  uploadIcon: (id: string, file: Blob) => {
+    let contentType = file.type;
+    if (!contentType && file instanceof File) {
+      const lower = file.name.toLowerCase();
+      if (lower.endsWith('.ico')) contentType = 'image/x-icon';
+      else if (lower.endsWith('.png')) contentType = 'image/png';
+      else if (lower.endsWith('.webp')) contentType = 'image/webp';
+      else if (lower.endsWith('.jpg') || lower.endsWith('.jpeg')) contentType = 'image/jpeg';
+    }
+    return request('POST', `/api/apps/${id}/icon`, file, true, 30000, contentType || 'application/octet-stream');
+  },
   deleteIcon: (id: string) => api.del(`/api/apps/${id}/icon`),
   getLogs: async (id: string, tail: number = 300): Promise<string> => {
     const res = await api.get<{ text: string }>(`/api/apps/${id}/logs?tail=${tail}`);
@@ -134,8 +164,14 @@ export const api = {
   setUiTheme: (theme: string) => api.post('/api/ui/theme', { theme }),
 
   // System helpers
-  pickPath: (what: 'dir' | 'script') =>
-    api.post<{ ok: boolean; path?: string; canceled?: boolean }>('/api/pick', { what }),
+  pickPath: (what: 'dir' | 'script', initialDir?: string) =>
+    request<{ ok: boolean; path?: string; canceled?: boolean }>(
+      'POST',
+      '/api/pick',
+      { what, initialDir },
+      false,
+      180000
+    ),
   detectProject: (cwd: string) =>
     api.post<DetectResponse>('/api/project/detect', { cwd }),
 };

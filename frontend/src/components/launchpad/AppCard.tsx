@@ -35,7 +35,7 @@ export const AppCard: React.FC<AppCardProps> = ({ app, onRefresh }) => {
         if (res.ok) {
           showToast(`已停止 ${app.name}`);
         } else {
-          showToast(`停止失败：${res.error}`);
+          showToast(`停止失败：${res.error || '未知错误'}`);
         }
       } else {
         const res = await api.startApp(app.id);
@@ -62,7 +62,7 @@ export const AppCard: React.FC<AppCardProps> = ({ app, onRefresh }) => {
       if (res.ok) {
         showToast(`已重启 ${app.name}`);
       } else {
-        showToast(`重启失败：${res.error}`);
+        showToast(`重启失败：${res.error || '未知错误'}`);
       }
       onRefresh();
     } finally {
@@ -92,7 +92,7 @@ export const AppCard: React.FC<AppCardProps> = ({ app, onRefresh }) => {
           showToast(`已删除 ${app.name}`);
           onRefresh();
         } else {
-          showToast(`删除失败: ${res.error}`);
+          showToast(`删除失败: ${res.error || '未知错误'}`);
         }
       },
     });
@@ -142,7 +142,7 @@ export const AppCard: React.FC<AppCardProps> = ({ app, onRefresh }) => {
 
   return (
     <article
-      className="group relative flex flex-col justify-between rounded-xl border p-4 transition-all duration-200 hover:shadow-md select-none"
+      className="group relative flex flex-col justify-between rounded-xl border p-4 transition-all duration-200 hover:-translate-y-1 hover:shadow-lg select-none"
       style={{
         backgroundColor: 'var(--card)',
         borderColor: isConflict ? 'var(--red)' : 'var(--card-border)',
@@ -160,7 +160,7 @@ export const AppCard: React.FC<AppCardProps> = ({ app, onRefresh }) => {
               }}
             >
               {app.icon ? (
-                <img src={app.icon} alt="" className="w-full h-full object-cover" />
+                <img src={app.icon} alt="" className="w-full h-full object-contain p-1" />
               ) : app.glyph ? (
                 <GlyphIcon name={app.glyph} size={20} />
               ) : app.favicon ? (

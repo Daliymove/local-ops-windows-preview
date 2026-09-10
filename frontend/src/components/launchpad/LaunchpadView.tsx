@@ -176,8 +176,14 @@ export const LaunchpadView: React.FC<LaunchpadViewProps> = ({ data, onRefresh })
 
       {filteredApps.length > 0 ? (
         <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
-          {filteredApps.map(app => (
-            <AppCard key={app.id} app={app} onRefresh={onRefresh} />
+          {filteredApps.map((app, idx) => (
+            <div
+              key={app.id}
+              style={{ '--d': Math.min(idx, 12) } as React.CSSProperties}
+              className="animate-card-stagger"
+            >
+              <AppCard app={app} onRefresh={onRefresh} />
+            </div>
           ))}
         </div>
       ) : (

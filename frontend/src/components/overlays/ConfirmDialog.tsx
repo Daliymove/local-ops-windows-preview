@@ -7,9 +7,23 @@ export const ConfirmDialog: React.FC = () => {
   const [force, setForce] = useState(false);
   const [loading, setLoading] = useState(false);
 
-  if (!confirmState) return null;
+  const isOpen = !!confirmState;
 
-  const { title, message, okText = '确认', cancelText = '取消', tone = 'danger', showForce, onConfirm } = confirmState;
+  // 监听 ESC 键关闭确认框
+  React.useEffect(() => {
+    if (!isOpen) return;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && !loading) {
+        closeConfirm();
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [isOpen, loading, closeConfirm]);
+
+  if (!isOpen) return null;
+
+  const { title, message, okText = '确认', cancelText = '取消', tone = 'danger', showForce, onConfirm } = confirmState!;
 
   const handleOk = async () => {
     setLoading(true);
@@ -22,9 +36,16 @@ export const ConfirmDialog: React.FC = () => {
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs animate-in fade-in">
+    <div
+      onClick={e => {
+        if (e.target === e.currentTarget && !loading) {
+          closeConfirm();
+        }
+      }}
+      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs animate-backdrop-in"
+    >
       <div
-        className="w-full max-w-md rounded-2xl border shadow-xl p-6 relative select-none animate-in zoom-in-95 duration-150"
+        className="w-full max-w-md rounded-2xl border shadow-xl p-6 relative select-none animate-modal-in"
         style={{
           backgroundColor: 'var(--card)',
           borderColor: 'var(--line-2)',

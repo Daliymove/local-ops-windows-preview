@@ -12,6 +12,18 @@ export const PortDiagnosticModal: React.FC<PortDiagnosticModalProps> = ({ onUpda
   const { portDiagApp, closePortDiag, showToast } = useModal();
   const [loading, setLoading] = useState(false);
 
+  // 监听 ESC 键关闭端口诊断
+  React.useEffect(() => {
+    if (!portDiagApp) return;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && !loading) {
+        closePortDiag();
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [portDiagApp, loading, closePortDiag]);
+
   if (!portDiagApp) return null;
 
   const app = portDiagApp;
@@ -53,9 +65,16 @@ export const PortDiagnosticModal: React.FC<PortDiagnosticModalProps> = ({ onUpda
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs animate-in fade-in">
+    <div
+      onClick={e => {
+        if (e.target === e.currentTarget && !loading) {
+          closePortDiag();
+        }
+      }}
+      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs animate-backdrop-in"
+    >
       <div
-        className="w-full max-w-md rounded-2xl border shadow-xl p-6 relative select-none animate-in zoom-in-95 duration-150"
+        className="w-full max-w-md rounded-2xl border shadow-xl p-6 relative select-none animate-modal-in"
         style={{
           backgroundColor: 'var(--card)',
           borderColor: 'var(--line-2)',

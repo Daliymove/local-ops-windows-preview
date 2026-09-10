@@ -12,6 +12,18 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ data }) => {
   const { isSettingsOpen, setSettingsOpen, showToast } = useModal();
   const { theme, setTheme } = useTheme();
 
+  // 监听 ESC 键关闭设置中心
+  React.useEffect(() => {
+    if (!isSettingsOpen) return;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setSettingsOpen(false);
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [isSettingsOpen, setSettingsOpen]);
+
   if (!isSettingsOpen) return null;
 
   const requestNotificationPermission = async () => {
@@ -28,9 +40,16 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ data }) => {
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs animate-in fade-in">
+    <div
+      onClick={e => {
+        if (e.target === e.currentTarget) {
+          setSettingsOpen(false);
+        }
+      }}
+      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs animate-backdrop-in"
+    >
       <div
-        className="w-full max-w-md rounded-2xl border shadow-xl p-6 relative select-none animate-in zoom-in-95 duration-150"
+        className="w-full max-w-md rounded-2xl border shadow-xl p-6 relative select-none animate-modal-in"
         style={{
           backgroundColor: 'var(--card)',
           borderColor: 'var(--line-2)',
