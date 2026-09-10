@@ -1,16 +1,23 @@
 import React, { useState, useMemo } from 'react';
 import type { StateResponse } from '../../types/console';
 import { AppCard } from './AppCard';
-import { Plus, Search, StopCircle, Layers } from 'lucide-react';
+import { Plus, Search, StopCircle, Layers, RotateCcw } from 'lucide-react';
 import { useModal } from '../../context/ModalContext';
 import { api } from '../../services/api';
 
 interface LaunchpadViewProps {
   data: StateResponse | null;
   onRefresh: () => void;
+  onMutate?: (updater: (prev: StateResponse | null) => StateResponse | null) => void;
+  isRestarting?: boolean;
 }
 
-export const LaunchpadView: React.FC<LaunchpadViewProps> = ({ data, onRefresh }) => {
+export const LaunchpadView: React.FC<LaunchpadViewProps> = ({
+  data,
+  onRefresh,
+  onMutate,
+  isRestarting = false,
+}) => {
   const { openAppEdit, openConfirm, showToast } = useModal();
   const [filterKind, setFilterKind] = useState<'all' | 'service' | 'task' | 'running' | 'issues'>('all');
   const [searchQuery, setSearchQuery] = useState('');
@@ -57,6 +64,10 @@ export const LaunchpadView: React.FC<LaunchpadViewProps> = ({ data, onRefresh })
       okText: '全部停止',
       tone: 'danger',
       onConfirm: async () => {
+        onMutate?.(prev => prev ? {
+          ...prev,
+          apps: prev.apps.map(a => ({ ...a, running: false }))
+        } : prev);
         for (const app of runningApps) {
           await api.stopApp(app.id);
         }
@@ -174,10 +185,34 @@ export const LaunchpadView: React.FC<LaunchpadViewProps> = ({ data, onRefresh })
         </div>
       </div>
 
-      {filteredApps.length > 0 ? (
+      {isRestarting ? (
+        <div
+          className="flex flex-col items-center justify-center py-24 rounded-2xl border text-center p-8 transition-all"
+          style={{ backgroundColor: 'var(--card)', borderColor: 'var(--line)' }}
+        >
+          <div
+            className="w-12 h-12 rounded-2xl flex items-center justify-center mb-4 border shadow-xs"
+            style={{ backgroundColor: 'var(--card-2)', borderColor: 'var(--line)' }}
+          >
+            <RotateCcw size={22} className="animate-spin text-[var(--accent)]" />
+          </div>
+          <h4 className="text-sm font-semibold" style={{ color: 'var(--ink)' }}>
+            总控台重启中…
+          </h4>
+          <p className="text-xs mt-1.5 max-w-sm leading-relaxed" style={{ color: 'var(--ink-3)' }}>
+            页面内容已清空重置，正在等待总控台核心服务重新启动并就绪，稍后将自动恢复展现
+          </p>
+        </div>
+      ) : filteredApps.length > 0 ? (
         <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
-          {filteredApps.map(app => (
-            <AppCard key={app.id} app={app} onRefresh={onRefresh} />
+          {filteredApps.map((app, idx) => (
+            <div
+              key={app.id}
+              style={{ '--d': Math.min(idx, 12) } as React.CSSProperties}
+              className="animate-card-stagger"
+            >
+              <AppCard app={app} onRefresh={onRefresh} onMutate={onMutate} />
+            </div>
           ))}
         </div>
       ) : (

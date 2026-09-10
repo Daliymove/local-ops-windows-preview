@@ -31,6 +31,9 @@ export interface AppItem {
   emoji: string | null;
   glyph: string | null;
   icon: string | null;
+  iconType?: 'preset' | 'custom' | null;
+  iconPath?: string | null;
+  iconSourcePath?: string | null;
   favicon: string | null;
   kind: 'service' | 'task';
   attached?: boolean;
@@ -106,6 +109,7 @@ export interface StateResponse {
   consolePort: number;
   consolePid: number;
   consoleCwd: string;
+  iconsDir?: string;
   version: string;
   schemaVersion: number;
   degraded: boolean;
@@ -123,12 +127,20 @@ export interface DetectCandidate {
   detail: string;
 }
 
+export interface PresetIconInfo {
+  source: string;
+  fullPath?: string;
+  dataUrl: string;
+  kind: string;
+}
+
 export interface DetectResponse {
   ok: boolean;
   cwd?: string;
   name?: string;
   files?: string[];
   candidates?: DetectCandidate[];
+  presetIcon?: PresetIconInfo | null;
   error?: string;
 }
 

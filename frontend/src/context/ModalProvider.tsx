@@ -1,4 +1,4 @@
-﻿import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback } from 'react';
 import type { AppItem } from '../types/console';
 import {
   ModalContext,
@@ -37,7 +37,13 @@ export const ModalProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
   const showToast = useCallback((message: string, duration = 3000) => {
     const id = Math.random().toString(36).slice(2, 9);
-    setToasts(prev => [...prev, { id, message, duration }]);
+    setToasts(prev => {
+      if (prev.some(t => t.message === message)) {
+        return prev;
+      }
+      const trimmed = prev.length >= 3 ? prev.slice(prev.length - 2) : prev;
+      return [...trimmed, { id, message, duration }];
+    });
     setTimeout(() => {
       setToasts(prev => prev.filter(t => t.id !== id));
     }, duration);

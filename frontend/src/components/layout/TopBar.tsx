@@ -10,6 +10,8 @@ interface TopBarProps {
   data: StateResponse | null;
   theme: string;
   onToggleTheme: () => void;
+  isRestarting?: boolean;
+  onRestartConsole?: () => Promise<boolean>;
 }
 
 export const TopBar: React.FC<TopBarProps> = ({
@@ -18,21 +20,27 @@ export const TopBar: React.FC<TopBarProps> = ({
   data,
   theme,
   onToggleTheme,
+  isRestarting = false,
+  onRestartConsole,
 }) => {
   const { openConfirm, showToast } = useModal();
 
   const handleRestartConsole = () => {
     openConfirm({
       title: '重启总控台',
-      message: '确定要重启总控台自身服务吗？已运行的独立服务进程不受影响。',
-      okText: '重启',
+      message: '确定要重启总控台自身服务吗？点击后页面将重置为初始状态，待服务启动后自动恢复呈现。',
+      okText: '确认重启',
       tone: 'primary',
       onConfirm: async () => {
-        const res = await api.restartConsole();
-        if (res.ok) {
-          showToast('总控台正在重启，稍后将自动重新连接…', 5000);
+        if (onRestartConsole) {
+          await onRestartConsole();
         } else {
-          showToast('重启失败：' + res.error, 4000);
+          const res = await api.restartConsole();
+          if (res.ok) {
+            showToast('总控台正在重启，稍后将自动重新连接…', 5000);
+          } else {
+            showToast('重启失败：' + res.error, 4000);
+          }
         }
       },
     });
@@ -149,12 +157,15 @@ export const TopBar: React.FC<TopBarProps> = ({
         <button
           type="button"
           onClick={handleRestartConsole}
+          disabled={isRestarting}
           title="重启总控台"
-          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors hover:bg-[var(--card-2)] cursor-pointer"
+          className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors cursor-pointer ${
+            isRestarting ? 'opacity-60 cursor-not-allowed bg-[var(--card-2)]' : 'hover:bg-[var(--card-2)]'
+          }`}
           style={{ borderColor: 'var(--line)', color: 'var(--ink-2)' }}
         >
-          <RotateCcw size={13} />
-          <span>重启</span>
+          <RotateCcw size={13} className={isRestarting ? 'animate-spin text-[var(--accent)]' : ''} />
+          <span>{isRestarting ? '重启中…' : '重启'}</span>
           <span className="mono text-[11px]" style={{ color: 'var(--ink-4)' }}>
             :{data?.consolePort || 9600}
           </span>

@@ -71,8 +71,78 @@ class WindowsParsingTests(unittest.TestCase):
         self.assertIsNotNone(dmtf)
         iso = server._win_parse_creation("2025-04-01T09:00:00Z")
         self.assertIsNotNone(iso)
+        ms_date = server._win_parse_creation("/Date(1789000429380)/")
+        self.assertEqual(ms_date, 1789000429.38)
+        ms_date_tz = server._win_parse_creation("/Date(1789000429380+0800)/")
+        self.assertEqual(ms_date_tz, 1789000429.38)
         self.assertIsNone(server._win_parse_creation(""))
         self.assertIsNone(server._win_parse_creation("garbage"))
+
+    def test_win_cpu_and_service_sort(self):
+        # 验证 build_services 排序规则：置顶 > 总控台 > 用户应用 > 系统应用
+        sample_services = [
+            {"name": "system_daemon.exe", "port": 135, "pinned": False, "appId": None,
+             "origin": {"label": "系统"}, "group": "background"},
+            {"name": "user_app.exe", "port": 4000, "pinned": False, "appId": None,
+             "origin": None, "group": "mine"},
+            {"name": "console.exe", "port": 5000, "pinned": False, "appId": "app1",
+             "origin": {"label": "总控台"}, "group": "mine"},
+            {"name": "pinned_user.exe", "port": 8000, "pinned": True, "appId": None,
+             "origin": None, "group": "mine"},
+            {"name": "pinned_console.exe", "port": 9000, "pinned": True, "appId": "app2",
+             "origin": {"label": "总控台"}, "group": "mine"},
+        ]
+
+        def _is_system_service(s):
+            origin = s.get("origin") or {}
+            origin_label = origin.get("label") or ""
+            if origin_label in ("系统", "System"):
+                return True
+            if s.get("group") == "background":
+                return True
+            name = (s.get("name") or "").lower()
+            if name in ("system", "spoolsv.exe", "lsass.exe", "wininit.exe",
+                        "csrss.exe", "services.exe", "smss.exe", "launchd", "kernel_task"):
+                return True
+            if name.startswith("svchost"):
+                return True
+            return False
+
+        def _is_console_service(s):
+            origin = s.get("origin") or {}
+            return bool(s.get("appId") or origin.get("label") == "总控台")
+
+        def _sort_key(s):
+            pinned = bool(s.get("pinned"))
+            is_console = _is_console_service(s)
+            is_system = _is_system_service(s)
+
+            if pinned:
+                tier = 0
+                sub_tier = 0 if is_console else (2 if is_system else 1)
+            elif is_console:
+                tier = 1
+                sub_tier = 0
+            elif not is_system:
+                tier = 2
+                sub_tier = 0
+            else:
+                tier = 3
+                sub_tier = 0
+
+            port = s.get("port") if s.get("port") is not None else 999999
+            name = s.get("name") or ""
+            return (tier, sub_tier, port, name)
+
+        sample_services.sort(key=_sort_key)
+        names = [s["name"] for s in sample_services]
+        self.assertEqual(names, [
+            "pinned_console.exe",  # 0: 置顶 + 总控台
+            "pinned_user.exe",     # 0: 置顶 + 用户
+            "console.exe",         # 1: 总控台应用
+            "user_app.exe",        # 2: 用户应用
+            "system_daemon.exe",   # 3: 系统应用
+        ])
 
     def test_win_tree_of_with_cycle(self):
         table = {

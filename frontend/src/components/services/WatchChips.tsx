@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import type { WatchedItem } from '../../types/console';
+import type { WatchedItem, StateResponse } from '../../types/console';
 import { Eye, Plus, X } from 'lucide-react';
 import { api } from '../../services/api';
 import { useModal } from '../../context/ModalContext';
@@ -8,12 +8,14 @@ interface WatchChipsProps {
   watchedKeywords: string[];
   watchedProcesses: WatchedItem[];
   onRefresh: () => void;
+  onMutate?: (updater: (prev: StateResponse | null) => StateResponse | null) => void;
 }
 
 export const WatchChips: React.FC<WatchChipsProps> = ({
   watchedKeywords,
   watchedProcesses,
   onRefresh,
+  onMutate,
 }) => {
   const { showToast } = useModal();
   const [newKeyword, setNewKeyword] = useState('');
@@ -22,6 +24,10 @@ export const WatchChips: React.FC<WatchChipsProps> = ({
     e.preventDefault();
     const kw = newKeyword.trim().toLowerCase();
     if (!kw) return;
+    onMutate?.(prev => prev ? {
+      ...prev,
+      watchedKeywords: prev.watchedKeywords.includes(kw) ? prev.watchedKeywords : [...prev.watchedKeywords, kw],
+    } : prev);
     const res = await api.setWatchKeyword(kw, 'add');
     if (res.ok) {
       showToast(`已添加关注关键词: ${kw}`);
@@ -29,13 +35,20 @@ export const WatchChips: React.FC<WatchChipsProps> = ({
       onRefresh();
     } else {
       showToast(`添加失败: ${res.error}`);
+      onRefresh();
     }
   };
 
   const handleRemove = async (kw: string) => {
+    onMutate?.(prev => prev ? {
+      ...prev,
+      watchedKeywords: prev.watchedKeywords.filter(k => k !== kw),
+    } : prev);
     const res = await api.setWatchKeyword(kw, 'remove');
     if (res.ok) {
       showToast(`已取消关注: ${kw}`);
+      onRefresh();
+    } else {
       onRefresh();
     }
   };

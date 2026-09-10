@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import type { AppItem, AppHealth } from '../../types/console';
+import type { AppItem, AppHealth, StateResponse } from '../../types/console';
 import {
   Play, Square, RotateCcw, ArrowUpRight, Copy,
   FileText, Activity, Edit3, Trash2, AlertTriangle, CheckCircle2
@@ -15,9 +15,10 @@ import {
 interface AppCardProps {
   app: AppItem;
   onRefresh: () => void;
+  onMutate?: (updater: (prev: StateResponse | null) => StateResponse | null) => void;
 }
 
-export const AppCard: React.FC<AppCardProps> = ({ app, onRefresh }) => {
+export const AppCard: React.FC<AppCardProps> = ({ app, onRefresh, onMutate }) => {
   const { openConfirm, openAppEdit, openLogDrawer, openPortDiag, openAppDiag, showToast } = useModal();
   const [loading, setLoading] = useState(false);
 
@@ -29,13 +30,19 @@ export const AppCard: React.FC<AppCardProps> = ({ app, onRefresh }) => {
 
   const handleToggle = async () => {
     setLoading(true);
+    const targetRunning = !app.running;
+    onMutate?.(prev => prev ? {
+      ...prev,
+      apps: prev.apps.map(a => a.id === app.id ? { ...a, running: targetRunning } : a),
+    } : prev);
+
     try {
       if (app.running) {
         const res = await api.stopApp(app.id);
         if (res.ok) {
           showToast(`已停止 ${app.name}`);
         } else {
-          showToast(`停止失败：${res.error}`);
+          showToast(`停止失败：${res.error || '未知错误'}`);
         }
       } else {
         const res = await api.startApp(app.id);
@@ -50,6 +57,8 @@ export const AppCard: React.FC<AppCardProps> = ({ app, onRefresh }) => {
         }
       }
       onRefresh();
+    } catch {
+      onRefresh();
     } finally {
       setLoading(false);
     }
@@ -62,7 +71,7 @@ export const AppCard: React.FC<AppCardProps> = ({ app, onRefresh }) => {
       if (res.ok) {
         showToast(`已重启 ${app.name}`);
       } else {
-        showToast(`重启失败：${res.error}`);
+        showToast(`重启失败：${res.error || '未知错误'}`);
       }
       onRefresh();
     } finally {
@@ -87,12 +96,17 @@ export const AppCard: React.FC<AppCardProps> = ({ app, onRefresh }) => {
       okText: '删除',
       tone: 'danger',
       onConfirm: async () => {
+        onMutate?.(prev => prev ? {
+          ...prev,
+          apps: prev.apps.filter(a => a.id !== app.id),
+        } : prev);
         const res = await api.deleteApp(app.id);
         if (res.ok) {
           showToast(`已删除 ${app.name}`);
           onRefresh();
         } else {
-          showToast(`删除失败: ${res.error}`);
+          showToast(`删除失败: ${res.error || '未知错误'}`);
+          onRefresh();
         }
       },
     });
@@ -142,7 +156,7 @@ export const AppCard: React.FC<AppCardProps> = ({ app, onRefresh }) => {
 
   return (
     <article
-      className="group relative flex flex-col justify-between rounded-xl border p-4 transition-all duration-200 hover:shadow-md select-none"
+      className="group relative flex flex-col justify-between rounded-xl border p-4 transition-all duration-200 hover:-translate-y-1 hover:shadow-lg select-none"
       style={{
         backgroundColor: 'var(--card)',
         borderColor: isConflict ? 'var(--red)' : 'var(--card-border)',
@@ -160,7 +174,7 @@ export const AppCard: React.FC<AppCardProps> = ({ app, onRefresh }) => {
               }}
             >
               {app.icon ? (
-                <img src={app.icon} alt="" className="w-full h-full object-cover" />
+                <img src={app.icon} alt="" className="w-full h-full object-contain p-1" />
               ) : app.glyph ? (
                 <GlyphIcon name={app.glyph} size={20} />
               ) : app.favicon ? (
