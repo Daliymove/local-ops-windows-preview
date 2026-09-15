@@ -5,7 +5,8 @@ param(
     [switch]$Dev,
     [switch]$Silent,
     [switch]$Background,
-    [switch]$Stop
+    [switch]$Stop,
+    [switch]$SetupOnly
 )
 
 $ErrorActionPreference = "Stop"
@@ -82,12 +83,18 @@ if (Test-Path -LiteralPath $frontendDir) {
     }
 }
 
+if ($SetupOnly) {
+    # 输出解析后的 Python 绝对路径，供启动批处理原生运行，彻底避免 powershell.exe 常驻
+    Write-Output $pyExe
+    exit 0
+}
+
 if ($Silent -or $Background) {
     $pyw = $pyExe -replace 'python\.exe$', 'pythonw.exe'
     if (-not (Test-Path -LiteralPath $pyw)) {
         $pyw = $pyExe
     }
-    $bgArgs = @("-X", "utf8", "-u", "server.py", "--launcher")
+    $bgArgs = @("-X", "utf8", "-u", $serverScript, "--launcher")
     if ($Port -gt 0) {
         $bgArgs += @("--preferred-port", [string]$Port)
     }
@@ -127,4 +134,9 @@ Write-Host "Starting Local Ops Console: $appDir"
 Write-Host "Python: $pyExe"
 Write-Host ""
 
-& $pyExe @serverArgs
+try {
+    & $pyExe @serverArgs
+}
+catch {
+    $null = $_
+}

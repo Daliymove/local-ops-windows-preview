@@ -81,6 +81,22 @@ function Slice-Bytes([byte[]]$b, [int]$from, [int]$to) {
     return ,$out
 }
 
+function Create-ShortcutViaCom([string]$TargetLnk, [string]$TargetExe, [string]$Arguments, [string]$WorkDir, [string]$Icon) {
+    try {
+        $ws = New-Object -ComObject WScript.Shell
+        $s = $ws.CreateShortcut($TargetLnk)
+        $s.TargetPath = $TargetExe
+        $s.Arguments = $Arguments
+        $s.WorkingDirectory = $WorkDir
+        $s.IconLocation = $Icon
+        $s.Save()
+        [Runtime.InteropServices.Marshal]::ReleaseComObject($ws) | Out-Null
+        return $true
+    } catch {
+        return $false
+    }
+}
+
 # "console" in Chinese, built from code points so this file stays pure ASCII
 # and cannot be mangled by the console code page.
 $consoleZh = -join @([char]0x603B, [char]0x63A7, [char]0x53F0)
@@ -105,14 +121,12 @@ if (-not $LnkPath) {
         if ($found.Count -eq 1) {
             $LnkPath = $found[0].FullName
         } elseif ($found.Count -eq 0) {
-            Fail "No .lnk found in $ProjectDir - point at one with -LnkPath."
+            $LnkPath = $preferred
         } else {
             Fail "Several .lnk files in $ProjectDir - pick one with -LnkPath."
         }
     }
 }
-if (-not (Test-Path -LiteralPath $LnkPath)) { Fail "Shortcut not found: $LnkPath" }
-$LnkPath = (Resolve-Path -LiteralPath $LnkPath).Path
 
 Write-Host ""
 Write-Host "  Project   : $ProjectDir"
@@ -136,6 +150,36 @@ if (-not (Test-Path -LiteralPath $iconPath)) {
         Write-Host "  Note      : no .ico under static\assets - using the PowerShell icon." -ForegroundColor Yellow
     }
 }
+
+# --- desired values ----------------------------------------------------------
+
+$wantWork = $ProjectDir
+if ([IO.Path]::GetExtension($iconPath) -ieq '.ico') {
+    $wantIcon = $iconPath
+} else {
+    $wantIcon = $iconPath + ',0'
+}
+$wantArgs = '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -Command "& ''' +
+            $scriptPath + ''' ' + $Switches + '"'
+
+if (-not (Test-Path -LiteralPath $LnkPath)) {
+    Write-Host "  Shortcut not found, creating a new shortcut..." -ForegroundColor Cyan
+    $psExe = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    $created = Create-ShortcutViaCom -TargetLnk $LnkPath -TargetExe $psExe -Arguments $wantArgs -WorkDir $wantWork -Icon $wantIcon
+    if ($created) {
+        Write-Host "  Start in  : $wantWork"
+        Write-Host "  Arguments : $wantArgs"
+        Write-Host "  Icon      : $wantIcon"
+        Write-Host ""
+        Write-Host "[OK] Shortcut created successfully." -ForegroundColor Green
+        Write-Host ""
+        if (-not $NoPause) { Read-Host "Press Enter to close" }
+        exit 0
+    } else {
+        Fail "Shortcut not found and could not be created: $LnkPath"
+    }
+}
+$LnkPath = (Resolve-Path -LiteralPath $LnkPath).Path
 
 # --- read and parse the link -------------------------------------------------
 
@@ -168,17 +212,6 @@ if ($flags -band $HAS_ICON)    { $origIcon = Read-Counted $bytes ([ref]$pos) }
 
 $extra = New-Object byte[] 0
 if ($pos -lt $bytes.Length) { $extra = Slice-Bytes $bytes $pos ($bytes.Length - 1) }
-
-# --- desired values ----------------------------------------------------------
-
-$wantWork = $ProjectDir
-if ([IO.Path]::GetExtension($iconPath) -ieq '.ico') {
-    $wantIcon = $iconPath
-} else {
-    $wantIcon = $iconPath + ',0'
-}
-$wantArgs = '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -Command "& ''' +
-            $scriptPath + ''' ' + $Switches + '"'
 
 Write-Host "  Desired"
 Write-Host "    Start in  : $wantWork"
@@ -247,8 +280,16 @@ Write-Host ""
 if ($bad -eq 0) {
     Write-Host "[OK] Shortcut repaired." -ForegroundColor Green
 } else {
-    Write-Host "[!] File written but $bad verification check(s) failed." -ForegroundColor Yellow
-    Write-Host "    Roll back with: Copy-Item '$backup' '$LnkPath' -Force"
+    Write-Host "[!] Binary verification failed, falling back to COM repair..." -ForegroundColor Yellow
+    $psExe = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    $comOk = Create-ShortcutViaCom -TargetLnk $LnkPath -TargetExe $psExe -Arguments $wantArgs -WorkDir $wantWork -Icon $wantIcon
+    if ($comOk) {
+        Write-Host "[OK] Shortcut repaired successfully via COM." -ForegroundColor Green
+        $bad = 0
+    } else {
+        Write-Host "[!] File written but $bad verification check(s) failed." -ForegroundColor Yellow
+        Write-Host "    Roll back with: Copy-Item '$backup' '$LnkPath' -Force"
+    }
 }
 Write-Host ""
 if ($origWork -and $origWork -ne $chkWork) {

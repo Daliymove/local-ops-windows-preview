@@ -683,13 +683,13 @@ def run_cmd(args, timeout=SUBPROCESS_TIMEOUT):
 # 收敛成与 macOS 路径同签名的实现；上层逻辑不做平台分支。
 
 
-def _win_powershell(script, timeout=SUBPROCESS_TIMEOUT):
-    """运行 PowerShell 并返回 stdout；失败返回空串。
+_SHUTTING_DOWN = False
 
-    显式把控制台输出编码切到 UTF-8：PowerShell 重定向输出默认用
-    系统 OEM 代码页（中文系统 GBK），与 Python 的 locale 编码不一致时
-    中文命令会乱码甚至破坏 JSON。
-    """
+
+def _win_powershell(script, timeout=SUBPROCESS_TIMEOUT):
+    """运行 PowerShell 并返回 stdout；失败返回空串。关机状态下直接拒绝拉起。"""
+    if _SHUTTING_DOWN:
+        return ""
     try:
         r = subprocess.run(
             ["powershell", "-NoProfile", "-NonInteractive",
@@ -742,7 +742,36 @@ def _parse_win_process_table_json(text):
 
 
 def _win_process_table():
-    """一次性 CIM 快照 → {pid: {ppid, args, name, exe, created, ws, kernel_time, user_time}}。"""
+    """快照 Windows 进程信息。优先使用 psutil 内存级毫秒获取；降级走 CIM。"""
+    if _SHUTTING_DOWN:
+        return {}
+    try:
+        import psutil
+        table = {}
+        for p in psutil.process_iter(['pid', 'ppid', 'name', 'exe', 'cmdline', 'create_time', 'memory_info', 'cpu_times']):
+            try:
+                info = p.info
+                cmd = ' '.join(info['cmdline']) if info.get('cmdline') else ''
+                mem = info['memory_info'].rss if info.get('memory_info') else 0
+                cpu = info.get('cpu_times')
+                k_time = int(cpu.system * 10000000) if cpu else 0
+                u_time = int(cpu.user * 10000000) if cpu else 0
+                table[info['pid']] = {
+                    'ppid': info.get('ppid'),
+                    'name': info.get('name') or '',
+                    'exe': info.get('exe') or '',
+                    'args': cmd,
+                    'created': info.get('create_time') or '',
+                    'ws': mem,
+                    'kernel_time': k_time,
+                    'user_time': u_time,
+                }
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                continue
+        return table
+    except (ImportError, Exception):
+        pass
+
     script = (
         "Get-CimInstance Win32_Process | "
         "Select-Object ProcessId,ParentProcessId,Name,ExecutablePath,"
@@ -757,10 +786,36 @@ _WIN_CPU_SAMPLES = {}  # {pid: (mono_time, total_cpu_100ns, created_str)}
 
 
 def _win_total_memory_kb():
-    """系统总物理内存（KB），10 秒缓存；失败返回 0。"""
+    """系统总物理内存（KB），优先使用 Win32 GlobalMemoryStatusEx，零子进程开销。"""
     now = time.monotonic()
     if now - _WIN_TOTAL_MEM_CACHE["mono"] < 10.0:
         return _WIN_TOTAL_MEM_CACHE["kb"]
+
+    if IS_WIN:
+        try:
+            class MEMORYSTATUSEX(ctypes.Structure):
+                _fields_ = [
+                    ("dwLength", wintypes.DWORD),
+                    ("dwMemoryLoad", wintypes.DWORD),
+                    ("ullTotalPhys", ctypes.c_uint64),
+                    ("ullAvailPhys", ctypes.c_uint64),
+                    ("ullTotalPageFile", ctypes.c_uint64),
+                    ("ullAvailPageFile", ctypes.c_uint64),
+                    ("ullTotalVirtual", ctypes.c_uint64),
+                    ("ullAvailVirtual", ctypes.c_uint64),
+                    ("ullAvailExtendedVirtual", ctypes.c_uint64),
+                ]
+
+            stat = MEMORYSTATUSEX()
+            stat.dwLength = ctypes.sizeof(MEMORYSTATUSEX)
+            if _KERNEL32 and _KERNEL32.GlobalMemoryStatusEx(ctypes.byref(stat)):
+                kb = float(stat.ullTotalPhys // 1024)
+                _WIN_TOTAL_MEM_CACHE["mono"] = now
+                _WIN_TOTAL_MEM_CACHE["kb"] = kb
+                return kb
+        except Exception:
+            pass
+
     out = _win_powershell(
         "(Get-CimInstance Win32_OperatingSystem).TotalVisibleMemorySize")
     try:
@@ -776,9 +831,11 @@ _WIN_EPOCH = 116444736000000000  # 1601-01-01 → 1970-01-01（100ns 单位）
 
 
 def _win_parse_creation(created):
-    """CIM CreationDate (ISO, WMI DMTF 或 /Date(...) 格式) → 创建时间戳秒；失败返回 None。"""
+    """CIM CreationDate 或时间戳秒 → 创建时间戳秒；失败返回 None。"""
     if not created:
         return None
+    if isinstance(created, (int, float)):
+        return float(created)
     text = str(created)
     try:
         m_date = re.search(r"/Date\((\d+)(?:[+-]\d+)?\)/", text)
@@ -4846,7 +4903,7 @@ def find_console_instances():
         args = info.get("args") or ""
         comm = (info.get("comm") or "").lower()
         if (pid == SELF_PID or info.get("uid") != SELF_UID
-                or "server.py" not in args
+                or not re.search(r'(?i)(?:^|[\s"\'/\\])server\.py(?:$|[\s"\'\\])', args)
                 or "--restart-helper" in args
                 or "--stop" in args
                 or "--prepare-storage" in args):
@@ -4915,10 +4972,11 @@ end run"""
 def launcher_main():
     """start.command / start.bat 的无命令启动入口。"""
     instances = find_console_instances()
+    active_instances = [item for item in instances if item.get("ports")]
     if IS_WIN:
-        # Windows 没有 osascript 重启对话框：已有实例就打开页面，否则启动。
-        if instances:
-            ports = [p for item in instances for p in item["ports"]]
+        # Windows 没有 osascript 重启对话框：已有真正监听端口的实例就打开页面，否则启动。
+        if active_instances:
+            ports = [p for item in active_instances for p in item["ports"]]
             port = min(ports) if ports else PORT_START
             webbrowser.open("http://%s:%d/" % (HOST, port))
             return
@@ -5082,6 +5140,38 @@ def stop_frontend_dev_server(proc):
             pass
 
 
+_ctrl_handler_ref = None
+
+
+def register_windows_shutdown_handler(server=None, frontend_proc=None):
+    """在 Windows 关机、注销或窗口关闭时快速优雅退出，避免阻止系统关机。"""
+    if not IS_WIN:
+        return
+    import ctypes
+    from ctypes import wintypes
+
+    def console_ctrl_handler(ctrl_type: int) -> bool:
+        # 5: CTRL_LOGOFF_EVENT, 6: CTRL_SHUTDOWN_EVENT (系统关机或注销时主动优雅退出)
+        # 注意：不要拦截 2 (CTRL_CLOSE_EVENT)，否则启动脚本进程关闭时会误杀后台运行的 pythonw
+        if ctrl_type in (5, 6):
+            global _SHUTTING_DOWN
+            _SHUTTING_DOWN = True
+            if frontend_proc:
+                stop_frontend_dev_server(frontend_proc)
+            if server:
+                try:
+                    server.server_close()
+                except Exception:
+                    pass
+            os._exit(0)
+        return False
+
+    handler_type = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.DWORD)
+    global _ctrl_handler_ref
+    _ctrl_handler_ref = handler_type(console_ctrl_handler)
+    ctypes.windll.kernel32.SetConsoleCtrlHandler(_ctrl_handler_ref, True)
+
+
 def _run_console(preferred_port=None, open_browser=True, dev_mode=False):
     logging.basicConfig(
         level=logging.INFO,
@@ -5119,6 +5209,8 @@ def _run_console(preferred_port=None, open_browser=True, dev_mode=False):
         frontend_proc = start_frontend_dev_server()
         if frontend_proc:
             atexit.register(stop_frontend_dev_server, frontend_proc)
+
+    register_windows_shutdown_handler(server=server, frontend_proc=frontend_proc)
 
     print("总控台后端已启动: http://%s:%d/  (Ctrl+C 停止)" % (HOST, port), flush=True)
     if open_browser:

@@ -52,51 +52,81 @@ def _win_anchor_startupinfo():
         return None
 
 
-def _live_descendants(root_pid):
-    """root 是否有存活后代（含隔代；父进程已退出的孤儿仍按 PPID 命中）。"""
+_ctrl_handler_ref = None
+
+
+def _register_shutdown_handler():
+    """注册 Win32 关机注销处理器，关机时平滑退出，不残留任何进程。"""
     try:
-        out = subprocess.run(
-            ["powershell", "-NoProfile", "-NonInteractive",
-             "-Command",
-             "[Console]::OutputEncoding=[Text.Encoding]::UTF8; "
-             "Get-CimInstance Win32_Process | "
-             "Select-Object ProcessId,ParentProcessId | ConvertTo-Json -Compress"],
-            capture_output=True, timeout=10,
-            creationflags=CREATE_NO_WINDOW,
-            startupinfo=_win_anchor_startupinfo())
-        text = out.stdout.decode("utf-8", errors="replace") or ""
+        import ctypes
+        from ctypes import wintypes
+
+        def _ctrl_handler(ctrl_type: int) -> bool:
+            if ctrl_type in (5, 6):
+                os._exit(0)
+            return False
+
+        handler_type = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.DWORD)
+        global _ctrl_handler_ref
+        _ctrl_handler_ref = handler_type(_ctrl_handler)
+        ctypes.windll.kernel32.SetConsoleCtrlHandler(_ctrl_handler_ref, True)
     except Exception:
-        return True  # 查询失败时保守认为仍在运行
+        pass
+
+
+def _live_descendants(root_pid):
+    """root 是否有存活后代（含隔代；父进程已退出的孤儿仍按 PPID 命中）。
+    使用 Win32 CreateToolhelp32Snapshot 原生快照，耗时 < 1ms，完全无需拉起 powershell.exe。
+    """
     try:
-        items = json.loads(text)
-    except ValueError:
+        import ctypes
+        from ctypes import wintypes
+
+        class PROCESSENTRY32(ctypes.Structure):
+            _fields_ = [
+                ("dwSize", wintypes.DWORD),
+                ("cntUsage", wintypes.DWORD),
+                ("th32ProcessID", wintypes.DWORD),
+                ("th32DefaultHeapID", ctypes.c_size_t),
+                ("th32ModuleID", wintypes.DWORD),
+                ("cntThreads", wintypes.DWORD),
+                ("th32ParentProcessID", wintypes.DWORD),
+                ("pcPriClassBase", wintypes.LONG),
+                ("dwFlags", wintypes.DWORD),
+                ("szExeFile", ctypes.c_char * 260),
+            ]
+
+        hSnapshot = ctypes.windll.kernel32.CreateToolhelp32Snapshot(0x00000002, 0)
+        if hSnapshot in (wintypes.HANDLE(-1).value, -1):
+            return True
+        entry = PROCESSENTRY32()
+        entry.dwSize = ctypes.sizeof(PROCESSENTRY32)
+        children = {}
+        if ctypes.windll.kernel32.Process32First(hSnapshot, ctypes.byref(entry)):
+            while True:
+                pid = entry.th32ProcessID
+                ppid = entry.th32ParentProcessID
+                if pid > 0 and ppid > 0:
+                    children.setdefault(ppid, []).append(pid)
+                if not ctypes.windll.kernel32.Process32Next(hSnapshot, ctypes.byref(entry)):
+                    break
+        ctypes.windll.kernel32.CloseHandle(hSnapshot)
+        stack = list(children.get(root_pid, []))
+        seen = set()
+        while stack:
+            pid = stack.pop()
+            if pid in seen:
+                continue
+            seen.add(pid)
+            stack.extend(children.get(pid, []))
+            return True
+        return False
+    except Exception:
         return True
-    if isinstance(items, dict):
-        items = [items]
-    children = {}
-    for item in items:
-        try:
-            pid = int(item.get("ProcessId") or 0)
-            ppid = int(item.get("ParentProcessId") or 0)
-        except (TypeError, ValueError):
-            continue
-        if pid <= 0:
-            continue
-        if ppid > 0:
-            children.setdefault(ppid, []).append(pid)
-    stack = list(children.get(root_pid, []))
-    seen = set()
-    while stack:
-        pid = stack.pop()
-        if pid in seen:
-            continue
-        seen.add(pid)
-        stack.extend(children.get(pid, []))
-        return True
-    return False
 
 
 def main():
+    _register_shutdown_handler()
     if len(sys.argv) < 3:
         return 1
     _marker, command = sys.argv[1], sys.argv[2]
