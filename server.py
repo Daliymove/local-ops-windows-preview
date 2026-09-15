@@ -741,13 +741,31 @@ def _parse_win_process_table_json(text):
     return table
 
 
-def _win_process_table():
-    """快照 Windows 进程信息。优先使用 psutil 内存级毫秒获取；降级走 CIM。"""
+_WIN_PROC_TABLE_CACHE = {"mono": 0.0, "table": None}
+_WIN_PROC_TABLE_LOCK = threading.Lock()
+_WIN_PROC_TABLE_TTL = 1.0
+
+
+def invalidate_win_process_table():
+    """使 Windows 进程快照缓存立即失效（在启停/杀进程等变更后调用）。"""
+    with _WIN_PROC_TABLE_LOCK:
+        _WIN_PROC_TABLE_CACHE["table"] = None
+
+
+def _win_process_table(force_refresh=False):
+    """快照 Windows 进程信息。优先使用 psutil 内存级毫秒获取；降级走 CIM。带短 TTL 缓存。"""
     if _SHUTTING_DOWN:
         return {}
+    now = time.monotonic()
+    if not force_refresh:
+        with _WIN_PROC_TABLE_LOCK:
+            cached = _WIN_PROC_TABLE_CACHE["table"]
+            if cached is not None and now - _WIN_PROC_TABLE_CACHE["mono"] < _WIN_PROC_TABLE_TTL:
+                return cached
+    table = None
     try:
         import psutil
-        table = {}
+        res = {}
         for p in psutil.process_iter(['pid', 'ppid', 'name', 'exe', 'cmdline', 'create_time', 'memory_info', 'cpu_times']):
             try:
                 info = p.info
@@ -756,7 +774,7 @@ def _win_process_table():
                 cpu = info.get('cpu_times')
                 k_time = int(cpu.system * 10000000) if cpu else 0
                 u_time = int(cpu.user * 10000000) if cpu else 0
-                table[info['pid']] = {
+                res[info['pid']] = {
                     'ppid': info.get('ppid'),
                     'name': info.get('name') or '',
                     'exe': info.get('exe') or '',
@@ -768,17 +786,23 @@ def _win_process_table():
                 }
             except (psutil.NoSuchProcess, psutil.AccessDenied):
                 continue
-        return table
+        table = res
     except (ImportError, Exception):
         pass
 
-    script = (
-        "Get-CimInstance Win32_Process | "
-        "Select-Object ProcessId,ParentProcessId,Name,ExecutablePath,"
-        "CommandLine,CreationDate,WorkingSetSize,KernelModeTime,UserModeTime | "
-        "ConvertTo-Json -Compress")
-    return _parse_win_process_table_json(
-        _win_powershell(script, timeout=SUBPROCESS_TIMEOUT * 2))
+    if table is None:
+        script = (
+            "Get-CimInstance Win32_Process | "
+            "Select-Object ProcessId,ParentProcessId,Name,ExecutablePath,"
+            "CommandLine,CreationDate,WorkingSetSize,KernelModeTime,UserModeTime | "
+            "ConvertTo-Json -Compress")
+        table = _parse_win_process_table_json(
+            _win_powershell(script, timeout=SUBPROCESS_TIMEOUT * 2))
+
+    with _WIN_PROC_TABLE_LOCK:
+        _WIN_PROC_TABLE_CACHE["mono"] = time.monotonic()
+        _WIN_PROC_TABLE_CACHE["table"] = table
+    return table
 
 
 _WIN_TOTAL_MEM_CACHE = {"mono": 0.0, "kb": 0.0}
@@ -1686,6 +1710,18 @@ def managed_process_index(apps, groups=None):
         pids = _managed_candidates(app, groups)
         candidates[app.get("id")] = pids
         all_pids.update(pids)
+    if IS_WIN and not all_pids:
+        if any(isinstance(app.get("lastPgid") or app.get("lastPid"), int)
+               and pid_alive(app.get("lastPgid") or app.get("lastPid"))
+               for app in apps if app.get("runToken")):
+            invalidate_win_process_table()
+            groups = pgid_members_map()
+            candidates = {}
+            all_pids = set()
+            for app in apps:
+                pids = _managed_candidates(app, groups)
+                candidates[app.get("id")] = pids
+                all_pids.update(pids)
     snap = ps_snapshot(all_pids, with_uid=True) if all_pids else {}
     result = {}
     for app in apps:
@@ -1801,7 +1837,7 @@ def build_apps(cfg, listeners, groups=None):
                      if configured_listener_pids else {})
     listener_cwds = lsof_cwds(configured_listener_pids)
     verified_owner = listener_app_owners(
-        apps_cfg, listeners, listener_snap, listener_cwds)
+        apps_cfg, listeners, listener_snap, listener_cwds, groups)
 
     apps = []
     for app in apps_cfg:
@@ -1962,6 +1998,8 @@ _state_cache = {"mono": 0.0, "state": None}
 def invalidate_state_cache():
     with _state_cache_lock:
         _state_cache["state"] = None
+    if IS_WIN:
+        invalidate_win_process_table()
 
 
 def get_state_snapshot(cfg, console_port):
@@ -2109,11 +2147,14 @@ def stop_pid_tree(pid, sig=signal.SIGTERM):
     if IS_WIN:
         ok, _ = _win_taskkill(int(pid), tree=True, force=False)
         if ok:
+            invalidate_win_process_table()
             return True, None
         ok, error = _win_taskkill(int(pid), tree=True, force=True)
         if ok:
+            invalidate_win_process_table()
             return True, None
         if not pid_alive(int(pid)):  # 目标已在验证与信号之间退出：幂等成功
+            invalidate_win_process_table()
             return True, None
         return False, error or "无法停止受控进程树"
     try:
@@ -2234,6 +2275,7 @@ def _start_app_windows(app, cwd, logf, env, marker, token):
         logf.close()
         return False, "启动失败: %s" % e, None, None, None
     logf.close()  # 子进程已持有副本，父进程关闭避免 fd 泄漏
+    invalidate_win_process_table()
     return True, None, proc, proc.pid, token
 
 
@@ -4653,7 +4695,19 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         port = app.get("port")
-        occupied = [(pid, p) for pid, p in scan_listeners() if p == port] if port else []
+        occupied = []
+        if port:
+            # 停止后为端口释放预留短暂缓冲（Windows 上 socket 释放有异步延迟）
+            deadline = time.monotonic() + 2.0
+            while time.monotonic() < deadline:
+                occupied = [(pid, p) for pid, p in scan_listeners() if p == port]
+                if not occupied:
+                    break
+                # 若占用者已非存活进程（仅为内核释放残余），短暂等待后重试
+                if not any(pid_alive(pid) for pid, _ in occupied):
+                    time.sleep(0.05)
+                    continue
+                time.sleep(0.1)
         if occupied:
             self.send_err(409, "端口 %d 已被 PID %d 占用，旧应用已停止" %
                           (port, occupied[0][0]))

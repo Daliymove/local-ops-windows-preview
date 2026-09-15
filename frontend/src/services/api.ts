@@ -103,10 +103,10 @@ async function request<T = unknown>(
 }
 
 export const api = {
-  get: <T = unknown>(path: string) => request<T>('GET', path),
-  post: <T = unknown>(path: string, body?: unknown) => request<T>('POST', path, body),
-  put: <T = unknown>(path: string, body?: unknown) => request<T>('PUT', path, body),
-  del: <T = unknown>(path: string) => request<T>('DELETE', path),
+  get: <T = unknown>(path: string, timeoutMs?: number) => request<T>('GET', path, undefined, false, timeoutMs),
+  post: <T = unknown>(path: string, body?: unknown, timeoutMs?: number) => request<T>('POST', path, body, false, timeoutMs),
+  put: <T = unknown>(path: string, body?: unknown, timeoutMs?: number) => request<T>('PUT', path, body, false, timeoutMs),
+  del: <T = unknown>(path: string, timeoutMs?: number) => request<T>('DELETE', path, undefined, false, timeoutMs),
 
   fetchState: async (signal?: AbortSignal): Promise<StateResponse | null> => {
     try {
@@ -122,11 +122,11 @@ export const api = {
   },
 
   // App operations
-  startApp: (id: string) => api.post(`/api/apps/${id}/start`, {}),
-  stopApp: (id: string) => api.post(`/api/apps/${id}/stop`, {}),
-  restartApp: (id: string) => api.post(`/api/apps/${id}/restart`, {}),
-  diagnoseApp: (id: string) => api.post<DiagnoseResponse>(`/api/apps/${id}/diagnose`, {}),
-  attachApp: (id: string, pid: number) => api.post(`/api/apps/${id}/attach`, { pid }),
+  startApp: (id: string) => api.post(`/api/apps/${id}/start`, {}, 30000),
+  stopApp: (id: string) => api.post(`/api/apps/${id}/stop`, {}, 30000),
+  restartApp: (id: string) => api.post(`/api/apps/${id}/restart`, {}, 30000),
+  diagnoseApp: (id: string) => api.post<DiagnoseResponse>(`/api/apps/${id}/diagnose`, {}, 30000),
+  attachApp: (id: string, pid: number) => api.post(`/api/apps/${id}/attach`, { pid }, 30000),
   fetchAppFavicon: (id: string) => api.post(`/api/apps/${id}/favicon`, {}),
   reorderApps: (ids: string[]) => api.post('/api/apps/reorder', { ids }),
   createApp: (data: Partial<AppItem> & { attachPid?: number }) => api.post<AppItem>('/api/apps', data),
