@@ -1,4 +1,4 @@
-param(
+﻿param(
     [int]$Port = 0,
     [switch]$NoBrowser,
     [switch]$RebuildFrontend,
@@ -10,9 +10,22 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$appDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+$appDir = $PSScriptRoot
+if (-not $appDir) { $appDir = Split-Path -Parent $MyInvocation.MyCommand.Path }
+if (-not $appDir) { $appDir = Split-Path -Parent $MyInvocation.MyCommand.Definition }
 $frontendDir = Join-Path $appDir "frontend"
 $frontendIndex = Join-Path $frontendDir "dist\index.html"
+
+function Show-LaunchError([string]$Message) {
+    $title = -join @([char]0x603B, [char]0x63A7, [char]0x53F0)
+    try {
+        $w = New-Object -ComObject WScript.Shell
+        [void]$w.Popup($Message, 0, $title, 16)
+        [Runtime.InteropServices.Marshal]::ReleaseComObject($w) | Out-Null
+    } catch {
+        Write-Host $Message
+    }
+}
 
 function Resolve-Python {
     $prev = $ErrorActionPreference
@@ -41,7 +54,16 @@ function Resolve-Python {
     }
 }
 
-$pyExe = Resolve-Python
+try {
+    $pyExe = Resolve-Python
+} catch {
+    if ($Silent -or $Background) {
+        Show-LaunchError $_.Exception.Message
+    } else {
+        Write-Host $_.Exception.Message
+    }
+    exit 1
+}
 $serverScript = Join-Path $appDir "server.py"
 
 if ($Stop) {
@@ -108,7 +130,13 @@ if ($Silent -or $Background) {
         $bgArgs += $args
     }
 
-    $proc = Start-Process -FilePath $pyw -ArgumentList $bgArgs -WorkingDirectory $appDir -WindowStyle Hidden -PassThru
+    try {
+        $proc = Start-Process -FilePath $pyw -ArgumentList $bgArgs -WorkingDirectory $appDir -WindowStyle Hidden -PassThru
+        if (-not $proc) { throw "Failed to start $pyw" }
+    } catch {
+        Show-LaunchError $_.Exception.Message
+        exit 1
+    }
     Write-Host "Local Ops Console started in background (PID: $($proc.Id))."
     Write-Host "Web UI: http://127.0.0.1:9600/"
     Write-Host "To stop: Run .\stop.cmd or use 'Stop Console' in Web UI."

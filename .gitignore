@@ -33,3 +33,4 @@ release/
 *.sha256
 .workbuddy/
 install-autostart.ps1
+总控台.lnk

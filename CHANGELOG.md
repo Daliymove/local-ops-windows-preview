@@ -8,6 +8,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **Windows 快捷方式跨电脑失效**：`repair-shortcut.cmd` 不再只改图标/参数字符串。复制到另一台电脑后会用 COM 重建快捷方式目标（清掉原电脑的 Tracker/IDList），并用 `-EncodedCommand` 启动，避免中文或空格路径下图标能显示但总控台打不开。静默启动失败时弹出错误，不再完全无提示。
+
 ### Added
 
 - **现代前端重构 (React 19 + TypeScript + Vite + Tailwind CSS v4)**：

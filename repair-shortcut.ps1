@@ -1,13 +1,15 @@
 <#
-    Console - repair the console shortcut after the project folder moved.
+    Console - rebuild the console shortcut for the current computer.
 
-    A .lnk keeps absolute paths in three places: working directory, arguments
-    and icon. Move or rename the project folder and the shortcut silently
-    breaks - double-click does nothing and the icon goes blank.
+    A .lnk stores the target as a machine-specific ID list plus a Tracker
+    block (original computer name / volume). Copying the project to another
+    PC, or only rewriting the icon/argument strings, leaves a shortcut that
+    can show the right icon but will not launch.
 
-    This script rewrites those three strings to match wherever the project
-    lives NOW, leaving the header, the target list and the extra data blocks
-    byte-for-byte intact.
+    This script always recreates the .lnk via COM on THIS computer:
+      target  = Windows PowerShell
+      args    = -EncodedCommand (UTF-16, safe for Chinese / spaces)
+      start in / icon = current project folder
 
     No administrator rights required.
 
@@ -17,17 +19,12 @@
       - In a terminal:  .\repair-shortcut.ps1
 
     OPTIONS
-      -LnkPath     shortcut to repair. Default: "<console name>.lnk" next to
+      -LnkPath     shortcut to write. Default: "<console name>.lnk" next to
                    this script, else the only .lnk in that folder.
       -ProjectDir  project root to point at. Default: this script's folder.
       -Switches    switches passed to start.ps1 inside the shortcut.
-                   Default: "-Silent"  (no console window, no browser)
+                   Default: "-Silent"  (no console window)
       -NoPause     do not wait for Enter before exiting.
-
-    LIMITATION
-      If the .lnk itself is missing, this cannot recreate it: building a target
-      list from scratch requires COM, which is deliberately off limits here.
-      Restore a .lnk.bak instead, or create the shortcut once by hand.
 #>
 
 param(
@@ -39,16 +36,6 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-# --- flags in the shell link header -----------------------------------------
-$HAS_IDLIST   = 0x01
-$HAS_LINKINFO = 0x02
-$HAS_NAME     = 0x04
-$HAS_RELPATH  = 0x08
-$HAS_WORKDIR  = 0x10
-$HAS_ARGS     = 0x20
-$HAS_ICON     = 0x40
-$IS_UNICODE   = 0x80
-
 function Fail($msg) {
     Write-Host ""
     Write-Host "[X] $msg" -ForegroundColor Red
@@ -57,51 +44,93 @@ function Fail($msg) {
     exit 1
 }
 
-function Read-Counted([byte[]]$b, [ref]$off) {
-    $n = [BitConverter]::ToUInt16($b, $off.Value)
-    $s = [Text.Encoding]::Unicode.GetString($b, $off.Value + 2, $n * 2)
-    $off.Value = $off.Value + 2 + $n * 2
-    return $s
-}
-
-function New-Counted([string]$s) {
-    $body = [Text.Encoding]::Unicode.GetBytes($s)
-    $buf = New-Object byte[] ($body.Length + 2)
-    $n = [uint16]$s.Length
-    $buf[0] = [byte]($n -band 0xFF)
-    $buf[1] = [byte](($n -shr 8) -band 0xFF)
-    [Array]::Copy($body, 0, $buf, 2, $body.Length)
-    return ,$buf
-}
-
-function Slice-Bytes([byte[]]$b, [int]$from, [int]$to) {
-    if ($to -lt $from) { return ,(New-Object byte[] 0) }
-    $out = New-Object byte[] ($to - $from + 1)
-    [Array]::Copy($b, $from, $out, 0, $out.Length)
-    return ,$out
-}
-
-function Create-ShortcutViaCom([string]$TargetLnk, [string]$TargetExe, [string]$Arguments, [string]$WorkDir, [string]$Icon) {
+function Same-Path([string]$Left, [string]$Right) {
+    if (-not $Left -or -not $Right) { return $false }
     try {
-        $ws = New-Object -ComObject WScript.Shell
-        $s = $ws.CreateShortcut($TargetLnk)
-        $s.TargetPath = $TargetExe
-        $s.Arguments = $Arguments
-        $s.WorkingDirectory = $WorkDir
-        $s.IconLocation = $Icon
-        $s.Save()
-        [Runtime.InteropServices.Marshal]::ReleaseComObject($ws) | Out-Null
-        return $true
+        $a = [IO.Path]::GetFullPath($Left).TrimEnd('\')
+        $b = [IO.Path]::GetFullPath($Right).TrimEnd('\')
+        return $a -ieq $b
     } catch {
         return $false
+    }
+}
+
+function Get-ShortcutArguments([string]$ScriptPath, [string]$WorkDir, [string]$ExtraSwitches) {
+    $escapedScript = $ScriptPath.Replace("'", "''")
+    $escapedDir = $WorkDir.Replace("'", "''")
+    $safeSwitches = [string]$ExtraSwitches
+    $command = @(
+        "`$ErrorActionPreference = 'Stop'"
+        "Set-Location -LiteralPath '$escapedDir'"
+        "& '$escapedScript' $safeSwitches"
+    ) -join "`n"
+    $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($command))
+    return "-NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -EncodedCommand $encoded"
+}
+
+function Save-ShortcutViaCom([string]$TargetLnk, [string]$TargetExe, [string]$Arguments, [string]$WorkDir, [string]$Icon) {
+    $ws = $null
+    $shortcut = $null
+    try {
+        $ws = New-Object -ComObject WScript.Shell
+        $shortcut = $ws.CreateShortcut($TargetLnk)
+        $shortcut.TargetPath = $TargetExe
+        $shortcut.Arguments = $Arguments
+        $shortcut.WorkingDirectory = $WorkDir
+        $shortcut.IconLocation = $Icon
+        $shortcut.WindowStyle = 7
+        $shortcut.Save()
+        return $true
+    } catch {
+        Write-Host "  COM save failed: $($_.Exception.Message)" -ForegroundColor Yellow
+        return $false
+    } finally {
+        if ($shortcut) { [void][Runtime.InteropServices.Marshal]::ReleaseComObject($shortcut) }
+        if ($ws) { [void][Runtime.InteropServices.Marshal]::ReleaseComObject($ws) }
+    }
+}
+
+function Read-ShortcutViaCom([string]$TargetLnk) {
+    $ws = $null
+    $shortcut = $null
+    try {
+        $ws = New-Object -ComObject WScript.Shell
+        $shortcut = $ws.CreateShortcut($TargetLnk)
+        return [pscustomobject]@{
+            TargetPath       = [string]$shortcut.TargetPath
+            Arguments        = [string]$shortcut.Arguments
+            WorkingDirectory = [string]$shortcut.WorkingDirectory
+            IconLocation     = [string]$shortcut.IconLocation
+        }
+    } finally {
+        if ($shortcut) { [void][Runtime.InteropServices.Marshal]::ReleaseComObject($shortcut) }
+        if ($ws) { [void][Runtime.InteropServices.Marshal]::ReleaseComObject($ws) }
+    }
+}
+
+function Test-Python312 {
+    $prev = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        if (Get-Command py -ErrorAction SilentlyContinue) {
+            & py -3.12 -c "import sys; sys.exit(0 if sys.version_info >= (3, 12) else 1)" 2>$null
+            if ($LASTEXITCODE -eq 0) { return $true }
+            & py -3 -c "import sys; sys.exit(0 if sys.version_info >= (3, 12) else 1)" 2>$null
+            if ($LASTEXITCODE -eq 0) { return $true }
+        }
+        if (Get-Command python -ErrorAction SilentlyContinue) {
+            & python -c "import sys; sys.exit(0 if sys.version_info >= (3, 12) else 1)" 2>$null
+            if ($LASTEXITCODE -eq 0) { return $true }
+        }
+        return $false
+    } finally {
+        $ErrorActionPreference = $prev
     }
 }
 
 # "console" in Chinese, built from code points so this file stays pure ASCII
 # and cannot be mangled by the console code page.
 $consoleZh = -join @([char]0x603B, [char]0x63A7, [char]0x53F0)
-
-# --- resolve paths ----------------------------------------------------------
 
 if (-not $ProjectDir) {
     $ProjectDir = $PSScriptRoot
@@ -137,8 +166,6 @@ if (-not (Test-Path -LiteralPath $scriptPath)) {
 Write-Host "  Launcher  : $scriptPath"
 Write-Host ""
 
-# --- pick an icon -----------------------------------------------------------
-
 $assetsDir = Join-Path $ProjectDir 'static\assets'
 $iconPath = Join-Path $assetsDir 'favicon.ico'
 if (-not (Test-Path -LiteralPath $iconPath)) {
@@ -151,165 +178,89 @@ if (-not (Test-Path -LiteralPath $iconPath)) {
     }
 }
 
-# --- desired values ----------------------------------------------------------
+$psExe = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+if (-not (Test-Path -LiteralPath $psExe)) {
+    Fail "Windows PowerShell not found: $psExe"
+}
 
 $wantWork = $ProjectDir
-if ([IO.Path]::GetExtension($iconPath) -ieq '.ico') {
-    $wantIcon = $iconPath
-} else {
-    $wantIcon = $iconPath + ',0'
-}
-$wantArgs = '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -Command "& ''' +
-            $scriptPath + ''' ' + $Switches + '"'
-
-if (-not (Test-Path -LiteralPath $LnkPath)) {
-    Write-Host "  Shortcut not found, creating a new shortcut..." -ForegroundColor Cyan
-    $psExe = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
-    $created = Create-ShortcutViaCom -TargetLnk $LnkPath -TargetExe $psExe -Arguments $wantArgs -WorkDir $wantWork -Icon $wantIcon
-    if ($created) {
-        Write-Host "  Start in  : $wantWork"
-        Write-Host "  Arguments : $wantArgs"
-        Write-Host "  Icon      : $wantIcon"
-        Write-Host ""
-        Write-Host "[OK] Shortcut created successfully." -ForegroundColor Green
-        Write-Host ""
-        if (-not $NoPause) { Read-Host "Press Enter to close" }
-        exit 0
-    } else {
-        Fail "Shortcut not found and could not be created: $LnkPath"
-    }
-}
-$LnkPath = (Resolve-Path -LiteralPath $LnkPath).Path
-
-# --- read and parse the link -------------------------------------------------
-
-$bytes = [IO.File]::ReadAllBytes($LnkPath)
-if ($bytes.Length -lt 78)              { Fail "File is too small to be a shortcut." }
-if ([BitConverter]::ToUInt32($bytes, 0) -ne 0x4C) { Fail "Not a shell link (unexpected header size)." }
-
-$flags = [BitConverter]::ToUInt32($bytes, 20)
-if (-not ($flags -band $HAS_IDLIST)) { Fail "Shortcut has no target list - cannot repair safely." }
-if (-not ($flags -band $IS_UNICODE)) { Fail "Shortcut is not Unicode - unsupported." }
-
-$idSize = [BitConverter]::ToUInt16($bytes, 76)
-$pos = 78 + $idSize
-
-$header   = Slice-Bytes $bytes 0 75
-$idList   = Slice-Bytes $bytes 76 ($pos - 1)
-$linkInfo = New-Object byte[] 0
-if ($flags -band $HAS_LINKINFO) {
-    $liSize = [BitConverter]::ToUInt32($bytes, $pos)
-    $linkInfo = Slice-Bytes $bytes $pos ($pos + $liSize - 1)
-    $pos = $pos + $liSize
-}
-
-$origName = $null; $origRel = $null; $origWork = $null; $origArgs = $null; $origIcon = $null
-if ($flags -band $HAS_NAME)    { $origName = Read-Counted $bytes ([ref]$pos) }
-if ($flags -band $HAS_RELPATH) { $origRel  = Read-Counted $bytes ([ref]$pos) }
-if ($flags -band $HAS_WORKDIR) { $origWork = Read-Counted $bytes ([ref]$pos) }
-if ($flags -band $HAS_ARGS)    { $origArgs = Read-Counted $bytes ([ref]$pos) }
-if ($flags -band $HAS_ICON)    { $origIcon = Read-Counted $bytes ([ref]$pos) }
-
-$extra = New-Object byte[] 0
-if ($pos -lt $bytes.Length) { $extra = Slice-Bytes $bytes $pos ($bytes.Length - 1) }
+$wantIcon = $iconPath + ',0'
+$wantArgs = Get-ShortcutArguments -ScriptPath $scriptPath -WorkDir $wantWork -ExtraSwitches $Switches
 
 Write-Host "  Desired"
+Write-Host "    Target    : $psExe"
 Write-Host "    Start in  : $wantWork"
-Write-Host "    Arguments : $wantArgs"
+Write-Host "    Script    : $scriptPath $Switches"
 Write-Host "    Icon      : $wantIcon"
 Write-Host ""
 
-if ($origWork -eq $wantWork -and $origArgs -eq $wantArgs -and $origIcon -eq $wantIcon) {
-    Write-Host "[OK] Shortcut already points at the current project folder - nothing to do." -ForegroundColor Green
-    Write-Host ""
-    if (-not $NoPause) { Read-Host "Press Enter to close" }
-    exit 0
+$existed = Test-Path -LiteralPath $LnkPath
+$backup = $null
+if ($existed) {
+    $backup = $LnkPath + '.bak'
+    Copy-Item -LiteralPath $LnkPath -Destination $backup -Force
+    Write-Host "  Backup    : $backup"
 }
 
-# --- rewrite -----------------------------------------------------------------
-
-$backup = $LnkPath + '.bak'
-Copy-Item -LiteralPath $LnkPath -Destination $backup -Force
-Write-Host "  Backup    : $backup"
-
-$newFlags = $flags -bor $HAS_WORKDIR -bor $HAS_ARGS -bor $HAS_ICON
-$flagBytes = [BitConverter]::GetBytes([uint32]$newFlags)
-for ($i = 0; $i -lt 4; $i++) { $header[20 + $i] = $flagBytes[$i] }
-
-$ms = New-Object IO.MemoryStream
-try {
-    $ms.Write($header, 0, $header.Length)
-    $ms.Write($idList, 0, $idList.Length)
-    $ms.Write($linkInfo, 0, $linkInfo.Length)
-    if ($origName) { $p1 = New-Counted $origName; $ms.Write($p1, 0, $p1.Length) }
-    if ($origRel)  { $p2 = New-Counted $origRel;  $ms.Write($p2, 0, $p2.Length) }
-    $p3 = New-Counted $wantWork; $ms.Write($p3, 0, $p3.Length)
-    $p4 = New-Counted $wantArgs; $ms.Write($p4, 0, $p4.Length)
-    $p5 = New-Counted $wantIcon; $ms.Write($p5, 0, $p5.Length)
-    if ($extra.Length -gt 0) { $ms.Write($extra, 0, $extra.Length) }
-    $out = $ms.ToArray()
+$created = Save-ShortcutViaCom -TargetLnk $LnkPath -TargetExe $psExe -Arguments $wantArgs -WorkDir $wantWork -Icon $wantIcon
+if (-not $created) {
+    if ($backup -and (Test-Path -LiteralPath $backup)) {
+        Copy-Item -LiteralPath $backup -Destination $LnkPath -Force
+    }
+    Fail "Could not create shortcut via COM: $LnkPath"
 }
-finally {
-    $ms.Dispose()
+
+$chk = Read-ShortcutViaCom -TargetLnk $LnkPath
+$iconFile = $chk.IconLocation
+if ($iconFile -and $iconFile.Contains(',')) {
+    $iconFile = $iconFile.Substring(0, $iconFile.LastIndexOf(','))
 }
-[IO.File]::WriteAllBytes($LnkPath, $out)
-
-# --- verify by re-reading ----------------------------------------------------
-
-$chk = [IO.File]::ReadAllBytes($LnkPath)
-$chkFlags = [BitConverter]::ToUInt32($chk, 20)
-$p = 78 + [BitConverter]::ToUInt16($chk, 76)
-if ($chkFlags -band $HAS_LINKINFO) { $p = $p + [BitConverter]::ToUInt32($chk, $p) }
-if ($chkFlags -band $HAS_NAME)    { [void](Read-Counted $chk ([ref]$p)) }
-if ($chkFlags -band $HAS_RELPATH) { [void](Read-Counted $chk ([ref]$p)) }
-$chkWork = Read-Counted $chk ([ref]$p)
-$chkArgs = Read-Counted $chk ([ref]$p)
-$chkIcon = Read-Counted $chk ([ref]$p)
 
 $bad = 0
-if ($chkWork -ne $wantWork) { $bad++ }
-if ($chkArgs -ne $wantArgs) { $bad++ }
-if ($chkIcon -ne $wantIcon) { $bad++ }
-$blob = $chkWork + "`n" + $chkArgs + "`n" + $chkIcon
-if ($origWork -and $origWork -ne $wantWork -and $blob.Contains($origWork)) {
-    Write-Host "  verify: stale working directory still present" -ForegroundColor Yellow
+if (-not (Same-Path $chk.TargetPath $psExe)) {
+    Write-Host "  verify: target is $($chk.TargetPath)" -ForegroundColor Yellow
+    $bad++
+}
+if ($chk.Arguments -ne $wantArgs) {
+    Write-Host "  verify: arguments were not stored as EncodedCommand" -ForegroundColor Yellow
+    $bad++
+}
+if (-not (Same-Path $chk.WorkingDirectory $wantWork)) {
+    Write-Host "  verify: working directory is $($chk.WorkingDirectory)" -ForegroundColor Yellow
+    $bad++
+}
+if (-not (Same-Path $iconFile $iconPath)) {
+    Write-Host "  verify: icon is $($chk.IconLocation)" -ForegroundColor Yellow
     $bad++
 }
 
 Write-Host ""
-if ($bad -eq 0) {
-    Write-Host "[OK] Shortcut repaired." -ForegroundColor Green
-} else {
-    Write-Host "[!] Binary verification failed, falling back to COM repair..." -ForegroundColor Yellow
-    $psExe = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
-    $comOk = Create-ShortcutViaCom -TargetLnk $LnkPath -TargetExe $psExe -Arguments $wantArgs -WorkDir $wantWork -Icon $wantIcon
-    if ($comOk) {
-        Write-Host "[OK] Shortcut repaired successfully via COM." -ForegroundColor Green
-        $bad = 0
-    } else {
-        Write-Host "[!] File written but $bad verification check(s) failed." -ForegroundColor Yellow
+if ($bad -ne 0) {
+    if ($backup -and (Test-Path -LiteralPath $backup)) {
         Write-Host "    Roll back with: Copy-Item '$backup' '$LnkPath' -Force"
     }
+    Fail "Shortcut was written but $bad verification check(s) failed."
 }
-Write-Host ""
-if ($origWork -and $origWork -ne $chkWork) {
-    Write-Host "  Start in  : $origWork"
-    Write-Host "           -> $chkWork"
+
+if ($existed) {
+    Write-Host "[OK] Shortcut rebuilt for this computer." -ForegroundColor Green
+} else {
+    Write-Host "[OK] Shortcut created successfully." -ForegroundColor Green
 }
-if ($origIcon -and $origIcon -ne $chkIcon) {
-    Write-Host "  Icon      : $origIcon"
-    Write-Host "           -> $chkIcon"
+
+if (-not (Test-Python312)) {
+    Write-Host ""
+    Write-Host "[!] Python 3.12+ was not found on this computer." -ForegroundColor Yellow
+    Write-Host "    The shortcut icon is ready, but the console cannot start until Python is installed"
+    Write-Host "    and available as 'py' or 'python' on PATH."
 }
-if ($origArgs -and $origArgs -ne $chkArgs) {
-    Write-Host "  Arguments :"
-    Write-Host "    old $origArgs"
-    Write-Host "    new $chkArgs"
-}
+
 Write-Host ""
 Write-Host "  Double-click the shortcut to test it."
-Write-Host "  Keep '$([IO.Path]::GetFileName($backup))' as a rollback."
+if ($backup) {
+    Write-Host "  Keep '$([IO.Path]::GetFileName($backup))' as a rollback."
+}
 Write-Host ""
 
 if (-not $NoPause) { Read-Host "Press Enter to close" }
-if ($bad -ne 0) { exit 1 }
 exit 0
