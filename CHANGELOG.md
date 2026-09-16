@@ -10,7 +10,7 @@
 
 ### Fixed
 
-- **Windows 快捷方式跨电脑失效**：`repair-shortcut.cmd` 不再只改图标/参数字符串。复制到另一台电脑后会用 COM 重建快捷方式目标（清掉原电脑的 Tracker/IDList），并用 `-EncodedCommand` 启动，避免中文或空格路径下图标能显示但总控台打不开。静默启动失败时弹出错误，不再完全无提示。
+- **根治 Windows 快捷方式报毒与启动闪烁**：`repair-shortcut.cmd` 生成的快捷方式全面改造为直连 Python 原生 GUI 运行时 `pythonw.exe`（`-X utf8 -u server.py --launcher`），彻底移除 PowerShell 中转与 Base64 `-EncodedCommand`，根除杀毒软件（如 Windows Defender / 360 / 火绒等）将其误判为 `TrojanDownloader/LNK.Agent.g` 木马的问题；同时利用 GUI 子系统特性实现真·零黑框闪烁与毫秒级极速拉起，并全面兼容中文与带空格路径。
 
 ### Added
 

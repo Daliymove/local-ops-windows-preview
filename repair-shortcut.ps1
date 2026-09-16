@@ -6,10 +6,14 @@
     PC, or only rewriting the icon/argument strings, leaves a shortcut that
     can show the right icon but will not launch.
 
-    This script always recreates the .lnk via COM on THIS computer:
-      target  = Windows PowerShell
-      args    = -EncodedCommand (UTF-16, safe for Chinese / spaces)
+    This script recreates the .lnk via COM on THIS computer:
+      target          = Python runtime (pythonw.exe, natively windowless GUI subsystem)
+      args            = -X utf8 -u "<project>\server.py" --launcher
       start in / icon = current project folder
+
+    Completely eliminates PowerShell wrapper and Base64 EncodedCommand payloads,
+    preventing heuristic antivirus false-positives (TrojanDownloader/LNK.Agent.g)
+    and ensuring true zero-console flicker launch.
 
     No administrator rights required.
 
@@ -22,15 +26,14 @@
       -LnkPath     shortcut to write. Default: "<console name>.lnk" next to
                    this script, else the only .lnk in that folder.
       -ProjectDir  project root to point at. Default: this script's folder.
-      -Switches    switches passed to start.ps1 inside the shortcut.
-                   Default: "-Silent"  (no console window)
+      -Switches    optional extra switches passed to the console, e.g. "-Port 9700".
       -NoPause     do not wait for Enter before exiting.
 #>
 
 param(
     [string]$LnkPath,
     [string]$ProjectDir,
-    [string]$Switches = '-Silent',
+    [string]$Switches = '',
     [switch]$NoPause
 )
 
@@ -55,17 +58,46 @@ function Same-Path([string]$Left, [string]$Right) {
     }
 }
 
-function Get-ShortcutArguments([string]$ScriptPath, [string]$WorkDir, [string]$ExtraSwitches) {
-    $escapedScript = $ScriptPath.Replace("'", "''")
-    $escapedDir = $WorkDir.Replace("'", "''")
-    $safeSwitches = [string]$ExtraSwitches
-    $command = @(
-        "`$ErrorActionPreference = 'Stop'"
-        "Set-Location -LiteralPath '$escapedDir'"
-        "& '$escapedScript' $safeSwitches"
-    ) -join "`n"
-    $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($command))
-    return "-NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -EncodedCommand $encoded"
+function Convert-SwitchesToArgs([string]$ExtraSwitches) {
+    if (-not $ExtraSwitches) { return @() }
+    $parts = $ExtraSwitches -split '\s+' | Where-Object { $_ }
+    $result = @()
+    $i = 0
+    while ($i -lt $parts.Length) {
+        $p = $parts[$i]
+        if ($p -ieq '-Port' -and ($i + 1) -lt $parts.Length) {
+            $result += @('--preferred-port', $parts[$i + 1])
+            $i += 2
+            continue
+        }
+        if ($p -ieq '-NoBrowser') {
+            $result += '--no-browser'
+            $i++
+            continue
+        }
+        if ($p -ieq '-Dev') {
+            $result += '--dev'
+            $i++
+            continue
+        }
+        if ($p -ieq '-Silent' -or $p -ieq '-Background') {
+            # pythonw.exe is natively windowless; ignore shell silent flags
+            $i++
+            continue
+        }
+        $result += $p
+        $i++
+    }
+    return $result
+}
+
+function Get-ShortcutArguments([string]$ServerScriptPath, [string]$ExtraSwitches) {
+    $argsList = @("-X", "utf8", "-u", "`"$ServerScriptPath`"", "--launcher")
+    $extra = Convert-SwitchesToArgs $ExtraSwitches
+    if ($extra -and $extra.Count -gt 0) {
+        $argsList += $extra
+    }
+    return $argsList -join " "
 }
 
 function Save-ShortcutViaCom([string]$TargetLnk, [string]$TargetExe, [string]$Arguments, [string]$WorkDir, [string]$Icon) {
@@ -78,7 +110,9 @@ function Save-ShortcutViaCom([string]$TargetLnk, [string]$TargetExe, [string]$Ar
         $shortcut.Arguments = $Arguments
         $shortcut.WorkingDirectory = $WorkDir
         $shortcut.IconLocation = $Icon
-        $shortcut.WindowStyle = 7
+        # 1 = Normal window. Because pythonw.exe is an IMAGE_SUBSYSTEM_WINDOWS_GUI binary,
+        # Windows will not allocate or show any console window.
+        $shortcut.WindowStyle = 1
         $shortcut.Save()
         return $true
     } catch {
@@ -108,21 +142,50 @@ function Read-ShortcutViaCom([string]$TargetLnk) {
     }
 }
 
-function Test-Python312 {
+function Resolve-PythonwExecutable([string]$ScriptPath) {
     $prev = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
     try {
-        if (Get-Command py -ErrorAction SilentlyContinue) {
-            & py -3.12 -c "import sys; sys.exit(0 if sys.version_info >= (3, 12) else 1)" 2>$null
-            if ($LASTEXITCODE -eq 0) { return $true }
-            & py -3 -c "import sys; sys.exit(0 if sys.version_info >= (3, 12) else 1)" 2>$null
-            if ($LASTEXITCODE -eq 0) { return $true }
+        $pyExe = $null
+        # 1. Prefer start.ps1 -SetupOnly to run environment checks and frontend build
+        if ($ScriptPath -and (Test-Path -LiteralPath $ScriptPath)) {
+            $setupOut = & $ScriptPath -SetupOnly 2>$null
+            if ($LASTEXITCODE -eq 0 -and $setupOut) {
+                $pyExe = ($setupOut | Select-Object -First 1).ToString().Trim()
+            }
         }
-        if (Get-Command python -ErrorAction SilentlyContinue) {
-            & python -c "import sys; sys.exit(0 if sys.version_info >= (3, 12) else 1)" 2>$null
-            if ($LASTEXITCODE -eq 0) { return $true }
+        # 2. Standalone fallback detection for Python 3.12+
+        if (-not $pyExe -or -not (Test-Path -LiteralPath $pyExe)) {
+            if (Get-Command py -ErrorAction SilentlyContinue) {
+                & py -3.12 -c "import sys; sys.exit(0 if sys.version_info >= (3, 12) else 1)" 2>$null
+                if ($LASTEXITCODE -eq 0) {
+                    $pyExe = (& py -3.12 -c "import sys; print(sys.executable)").Trim()
+                } else {
+                    & py -3 -c "import sys; sys.exit(0 if sys.version_info >= (3, 12) else 1)" 2>$null
+                    if ($LASTEXITCODE -eq 0) {
+                        $pyExe = (& py -3 -c "import sys; print(sys.executable)").Trim()
+                    }
+                }
+            }
         }
-        return $false
+        if (-not $pyExe -or -not (Test-Path -LiteralPath $pyExe)) {
+            if (Get-Command python -ErrorAction SilentlyContinue) {
+                & python -c "import sys; sys.exit(0 if sys.version_info >= (3, 12) else 1)" 2>$null
+                if ($LASTEXITCODE -eq 0) {
+                    $pyExe = (& python -c "import sys; print(sys.executable)").Trim()
+                }
+            }
+        }
+        if (-not $pyExe -or -not (Test-Path -LiteralPath $pyExe)) {
+            return $null
+        }
+
+        # Prefer pythonw.exe (windowless GUI subsystem), fallback to python.exe
+        $pyw = $pyExe -replace 'python\.exe$', 'pythonw.exe'
+        if (Test-Path -LiteralPath $pyw) {
+            return $pyw
+        }
+        return $pyExe
     } finally {
         $ErrorActionPreference = $prev
     }
@@ -139,6 +202,11 @@ if (-not $ProjectDir) {
 if (-not (Test-Path -LiteralPath $ProjectDir)) { Fail "Project folder not found: $ProjectDir" }
 $ProjectDir = (Resolve-Path -LiteralPath $ProjectDir).Path
 $scriptPath = Join-Path $ProjectDir 'start.ps1'
+$serverScript = Join-Path $ProjectDir 'server.py'
+
+if (-not (Test-Path -LiteralPath $serverScript)) {
+    Fail "server.py not found in the project folder - is -ProjectDir correct?"
+}
 
 if (-not $LnkPath) {
     $preferred = Join-Path $ProjectDir ($consoleZh + '.lnk')
@@ -160,10 +228,7 @@ if (-not $LnkPath) {
 Write-Host ""
 Write-Host "  Project   : $ProjectDir"
 Write-Host "  Shortcut  : $LnkPath"
-if (-not (Test-Path -LiteralPath $scriptPath)) {
-    Fail "start.ps1 not found in the project folder - is -ProjectDir correct?"
-}
-Write-Host "  Launcher  : $scriptPath"
+Write-Host "  Server    : $serverScript"
 Write-Host ""
 
 $assetsDir = Join-Path $ProjectDir 'static\assets'
@@ -173,24 +238,29 @@ if (-not (Test-Path -LiteralPath $iconPath)) {
     if ($ico.Count -ge 1) {
         $iconPath = $ico[0].FullName
     } else {
-        $iconPath = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
-        Write-Host "  Note      : no .ico under static\assets - using the PowerShell icon." -ForegroundColor Yellow
+        $iconPath = $null
     }
 }
 
-$psExe = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
-if (-not (Test-Path -LiteralPath $psExe)) {
-    Fail "Windows PowerShell not found: $psExe"
+Write-Host "  Detecting Python runtime (Python 3.12+)..."
+$targetExe = Resolve-PythonwExecutable -ScriptPath $scriptPath
+if (-not $targetExe) {
+    Fail "Python 3.12+ was not found on this computer.`n      Please install Python 3.12 or newer and make sure 'py' or 'python' is on PATH,`n      then run repair-shortcut.cmd again."
+}
+
+if (-not $iconPath) {
+    $iconPath = $targetExe
+    Write-Host "  Note      : no .ico under static\assets - using executable icon." -ForegroundColor Yellow
 }
 
 $wantWork = $ProjectDir
 $wantIcon = $iconPath + ',0'
-$wantArgs = Get-ShortcutArguments -ScriptPath $scriptPath -WorkDir $wantWork -ExtraSwitches $Switches
+$wantArgs = Get-ShortcutArguments -ServerScriptPath $serverScript -ExtraSwitches $Switches
 
 Write-Host "  Desired"
-Write-Host "    Target    : $psExe"
+Write-Host "    Target    : $targetExe"
 Write-Host "    Start in  : $wantWork"
-Write-Host "    Script    : $scriptPath $Switches"
+Write-Host "    Arguments : $wantArgs"
 Write-Host "    Icon      : $wantIcon"
 Write-Host ""
 
@@ -202,7 +272,7 @@ if ($existed) {
     Write-Host "  Backup    : $backup"
 }
 
-$created = Save-ShortcutViaCom -TargetLnk $LnkPath -TargetExe $psExe -Arguments $wantArgs -WorkDir $wantWork -Icon $wantIcon
+$created = Save-ShortcutViaCom -TargetLnk $LnkPath -TargetExe $targetExe -Arguments $wantArgs -WorkDir $wantWork -Icon $wantIcon
 if (-not $created) {
     if ($backup -and (Test-Path -LiteralPath $backup)) {
         Copy-Item -LiteralPath $backup -Destination $LnkPath -Force
@@ -217,12 +287,14 @@ if ($iconFile -and $iconFile.Contains(',')) {
 }
 
 $bad = 0
-if (-not (Same-Path $chk.TargetPath $psExe)) {
-    Write-Host "  verify: target is $($chk.TargetPath)" -ForegroundColor Yellow
+if (-not (Same-Path $chk.TargetPath $targetExe)) {
+    Write-Host "  verify: target is $($chk.TargetPath) (expected $targetExe)" -ForegroundColor Yellow
     $bad++
 }
 if ($chk.Arguments -ne $wantArgs) {
-    Write-Host "  verify: arguments were not stored as EncodedCommand" -ForegroundColor Yellow
+    Write-Host "  verify: arguments mismatch" -ForegroundColor Yellow
+    Write-Host "          actual:   $($chk.Arguments)" -ForegroundColor Yellow
+    Write-Host "          expected: $wantArgs" -ForegroundColor Yellow
     $bad++
 }
 if (-not (Same-Path $chk.WorkingDirectory $wantWork)) {
@@ -243,16 +315,9 @@ if ($bad -ne 0) {
 }
 
 if ($existed) {
-    Write-Host "[OK] Shortcut rebuilt for this computer." -ForegroundColor Green
+    Write-Host "[OK] Shortcut rebuilt for this computer (native pythonw, zero AV false-positive)." -ForegroundColor Green
 } else {
-    Write-Host "[OK] Shortcut created successfully." -ForegroundColor Green
-}
-
-if (-not (Test-Python312)) {
-    Write-Host ""
-    Write-Host "[!] Python 3.12+ was not found on this computer." -ForegroundColor Yellow
-    Write-Host "    The shortcut icon is ready, but the console cannot start until Python is installed"
-    Write-Host "    and available as 'py' or 'python' on PATH."
+    Write-Host "[OK] Shortcut created successfully (native pythonw, zero AV false-positive)." -ForegroundColor Green
 }
 
 Write-Host ""

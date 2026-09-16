@@ -268,6 +268,72 @@ class WindowsProcessTests(unittest.TestCase):
         self.assertEqual(env["PATH"], "C:\\bin")
         self.assertEqual(env[server.RUN_TOKEN_ENV], "win-secret")
 
+    def test_repair_shortcut_generates_pythonw_target(self):
+        with tempfile.TemporaryDirectory() as td:
+            lnk_path = os.path.join(td, "test_console.lnk")
+            script = os.path.join(server.BASE_DIR, "repair-shortcut.ps1")
+            res = subprocess.run(
+                ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
+                 "-File", script, "-LnkPath", lnk_path, "-NoPause"],
+                capture_output=True, text=True, encoding="utf-8", errors="replace"
+            )
+            self.assertEqual(res.returncode, 0, res.stderr or res.stdout)
+            self.assertTrue(os.path.isfile(lnk_path))
+
+            # 读取快捷方式属性
+            safe_lnk = lnk_path.replace("'", "''")
+            read_script = (
+                f"$w = New-Object -ComObject WScript.Shell; "
+                f"$s = $w.CreateShortcut('{safe_lnk}'); "
+                f"$obj = [pscustomobject]@{{ Target = [string]$s.TargetPath; Args = [string]$s.Arguments; Style = [int]$s.WindowStyle }}; "
+                f"$obj | ConvertTo-Json"
+            )
+            inspect_res = subprocess.run(
+                ["powershell", "-NoProfile", "-Command", read_script],
+                capture_output=True, text=True, encoding="utf-8", errors="replace"
+            )
+            self.assertEqual(inspect_res.returncode, 0, inspect_res.stderr)
+            data = json.loads(inspect_res.stdout)
+            target = data["Target"].lower()
+            args = data["Args"]
+            style = data["Style"]
+
+            # 验证绝不使用 powershell.exe 作为快捷方式目标，杜绝 TrojanDownloader/LNK.Agent 误报
+            self.assertNotIn("powershell", target)
+            self.assertTrue(target.endswith("pythonw.exe") or target.endswith("python.exe"))
+            self.assertNotIn("-EncodedCommand", args)
+            self.assertNotIn("Bypass", args)
+            self.assertIn("--launcher", args)
+            self.assertIn("-X utf8", args)
+            self.assertEqual(style, 1)
+
+    def test_repair_shortcut_forwards_switches(self):
+        with tempfile.TemporaryDirectory() as td:
+            lnk_path = os.path.join(td, "test_switches.lnk")
+            script = os.path.join(server.BASE_DIR, "repair-shortcut.ps1")
+            res = subprocess.run(
+                ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
+                 "-File", script, "-LnkPath", lnk_path, "-Switches", "-Port 9700 -NoBrowser", "-NoPause"],
+                capture_output=True, text=True, encoding="utf-8", errors="replace"
+            )
+            self.assertEqual(res.returncode, 0, res.stderr or res.stdout)
+            safe_lnk = lnk_path.replace("'", "''")
+            read_script = (
+                f"$w = New-Object -ComObject WScript.Shell; "
+                f"$s = $w.CreateShortcut('{safe_lnk}'); "
+                f"Write-Output $s.Arguments"
+            )
+            inspect_res = subprocess.run(
+                ["powershell", "-NoProfile", "-Command", read_script],
+                capture_output=True, text=True, encoding="utf-8", errors="replace"
+            )
+            self.assertEqual(inspect_res.returncode, 0)
+            args = inspect_res.stdout.strip()
+            self.assertIn("--preferred-port 9700", args)
+            self.assertIn("--no-browser", args)
+            self.assertIn("--launcher", args)
+
+
 
 if __name__ == "__main__":
     unittest.main()

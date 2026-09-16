@@ -5024,25 +5024,36 @@ end run"""
 
 
 def launcher_main():
-    """start.command / start.bat 的无命令启动入口。"""
+    """start.command / start.bat / 快捷方式的无命令启动入口。"""
+    preferred = None
+    if "--preferred-port" in sys.argv:
+        try:
+            idx = sys.argv.index("--preferred-port")
+            preferred = int(sys.argv[idx + 1])
+        except (ValueError, IndexError):
+            pass
+    dev_mode = ("--dev" in sys.argv or "--with-frontend" in sys.argv) and ("--no-frontend" not in sys.argv)
+    open_browser = "--no-browser" not in sys.argv
+
     instances = find_console_instances()
     active_instances = [item for item in instances if item.get("ports")]
     if IS_WIN:
         # Windows 没有 osascript 重启对话框：已有真正监听端口的实例就打开页面，否则启动。
         if active_instances:
             ports = [p for item in active_instances for p in item["ports"]]
-            port = min(ports) if ports else PORT_START
-            webbrowser.open("http://%s:%d/" % (HOST, port))
+            port = min(ports) if ports else (preferred or PORT_START)
+            if open_browser:
+                webbrowser.open("http://%s:%d/" % (HOST, port))
             return
         try:
-            main(log_to_file=True)
+            main(preferred_port=preferred, open_browser=open_browser, log_to_file=True, dev_mode=dev_mode)
         except Exception:
             _launcher_alert("总控台启动失败。请检查数据目录权限和 console.log。")
             raise
         return
     if not instances:
         try:
-            main(log_to_file=True)
+            main(preferred_port=preferred, open_browser=open_browser, log_to_file=True, dev_mode=dev_mode)
         except Exception:
             _launcher_alert("总控台启动失败。请检查数据目录权限和 console.log。")
             raise
@@ -5057,14 +5068,16 @@ def launcher_main():
         "总控台已在运行：\n" + "\n".join(labels) + extra)
     if choice == "打开控制台":
         ports = [p for item in instances for p in item["ports"]]
-        port = min(ports) if ports else PORT_START
-        webbrowser.open("http://%s:%d/" % (HOST, port))
+        port = min(ports) if ports else (preferred or PORT_START)
+        if open_browser:
+            webbrowser.open("http://%s:%d/" % (HOST, port))
         return
     if choice != "重新启动":
         return
 
     preferred_ports = [p for item in instances for p in item["ports"]]
-    preferred = min(preferred_ports) if preferred_ports else PORT_START
+    if preferred is None:
+        preferred = min(preferred_ports) if preferred_ports else PORT_START
     targets = [item["pid"] for item in instances]
     for pid in targets:
         if process_uid(pid) == SELF_UID:
@@ -5081,7 +5094,7 @@ def launcher_main():
                         "、".join(str(pid) for pid in survivors))
         return
     try:
-        main(preferred_port=preferred, log_to_file=True)
+        main(preferred_port=preferred, open_browser=open_browser, log_to_file=True, dev_mode=dev_mode)
     except Exception:
         _launcher_alert("总控台重启失败。请检查数据目录权限和 console.log。")
         raise
